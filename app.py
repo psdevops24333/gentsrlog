@@ -1,19 +1,29 @@
 import streamlit as st, zipfile, json, io
 import xml.etree.ElementTree as ET
 
-def f_sz(s):
-    if not s or s in ['0','0 Bytes','-','None']: return "-"
-    s = str(s).strip().upper()
-    if s.replace('.','').isdigit():
+# ฟังก์ชันแปลงหน่วย RAM เป็น GB
+def f_ram(s):
+    s = str(s).upper().replace('MB','').replace('BYTES','').replace(' ','')
+    try:
         v = float(s)
-        if v>1073741824: return f"{v/(1024**3):.2f} GB"
-        if v>1048576: return f"{v/(1024**2):.2f} MB"
-        return f"{int(v)} Bytes"
-    return s
+        return f"{v/(1024**3):.0f} GB" if v > 1048576 else f"{v/1024:.0f} GB"
+    except: return str(s)
+
+# ฟังก์ชันแปลงหน่วย Disk เป็น GB / TB
+def f_dsk(s):
+    s = str(s).upper().replace('BYTES','').replace('B','').replace(' ','')
+    try:
+        v = float(s)
+        if v > 1000**4: return f"{v/(1000**4):.2f} TB"
+        if v > 1000**3: return f"{v/(1000**3):.0f} GB"
+        if v > 1024**3: return f"{v/(1024**3):.0f} GB"
+    except: pass
+    return str(s)
 
 def parse_tsr(up_file):
-    ex = []
+    ex = {}
     try:
+        # เปิด ZIP และกวาดไฟล์
         with zipfile.ZipFile(up_file, 'r') as oz:
             fs = oz.namelist()
             izn = next((f for f in fs if f.lower().endswith('.zip')), None)
@@ -21,6 +31,12 @@ def parse_tsr(up_file):
             tfs = tz.namelist()
             jf = next((f for f in tfs if 'hardware_inventory.json' in f.lower() or 'hw_inventory.json' in f.lower()), None)
             xfs = [f for f in tfs if ('sysinfo_' in f.lower() and f.endswith('.xml')) or 'inventory.xml' in f.lower() or 'hw_inventory.xml' in f.lower()]
+
+            def add_item(ad):
+                id_ = ad.get("_ID_")
+                if id_ and id_ not in ['PROPERTY', 'VALUE', 'ATTRIBUTE']:
+                    if id_ not in ex: ex[id_] = ad
+                    else: ex[id_].update(ad) # รวมร่างคุณสมบัติของอุปกรณ์ตัวเดียวกัน
 
             if jf:
                 jd = json.loads(tz.read(jf).decode('utf-8', errors='ignore'))
@@ -31,8 +47,9 @@ def parse_tsr(up_file):
                     if isinstance(ats, dict): ats = [ats]
                     ad = {a.get("@Name", a.get("Name")).upper(): str(a.get("#text", a.get("Value", a.get("text")))).strip() for a in ats if a.get("@Name", a.get("Name"))}
                     ad["_ID_"] = c.get("@FQDD", c.get("FQDD", "")).upper()
-                    ex.append(ad)
-            elif xfs:
+                    add_item(ad)
+                    
+            if xfs:
                 for f in xfs:
                     try:
                         rt = ET.fromstring(tz.read(f))
@@ -49,47 +66,57 @@ def parse_tsr(up_file):
                                     if vl: ad[ky] = vl
                                 elif ch.text and ch.text.strip(): ad[tg] = ch.text.strip()
                             ad["_ID_"] = ad.get('INSTANCEID', ad.get('FQDD', ad.get('DEVICEID', c.tag))).upper()
-                            if ad["_ID_"] not in ['PROPERTY', 'VALUE', 'ATTRIBUTE']: ex.append(ad)
+                            add_item(ad)
                     except: pass
 
         si = {"Model": "-", "Service Tag": "-", "Hostname": "-", "IP iDRAC": "-"}
         cp, rm, dk, ct, nc = [], [], [], [], []
         
-        for ad in ex:
-            id = ad.get("_ID_", "")
-            if 'SYSTEM' in id or 'BOARD' in id:
+        # วนลูปสร้างตาราง (อิงตาม Slot จริง ห้ามตัดซ้ำ)
+        for id_, ad in sorted(ex.items()):
+            if 'SYSTEM' in id_ or 'BOARD' in id_:
                 for k, n in [('MODEL','Model'), ('SERVICETAG','Service Tag'), ('HOSTNAME','Hostname')]:
                     if ad.get(k): si[n] = ad[k]
-            elif 'IPV4' in id or 'IDRAC' in id:
+            elif 'IPV4' in id_ or 'IDRAC' in id_:
                 ip = ad.get('CURRENTIPADDRESS', ad.get('ADDRESS'))
                 if ip and ip not in ['0.0.0.0', '::', '127.0.0.1']: si['IP iDRAC'] = ip
-            elif 'CPU' in id:
+                
+            elif 'CPU' in id_:
                 m = ad.get('MODEL', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if m != '-':
-                    cp.append({"Model": m, "Clock": f"{ad.get('CURRENTCLOCKSPEED','-')} (max {ad.get('MAXCLOCKSPEED','-')})", "Cores": ad.get('NUMBEROFPROCESSORCORES', ad.get('CORECOUNT', '-')), "Threads": ad.get('NUMBEROFENABLEDTHREADS', ad.get('THREADCOUNT', '-')), "L1": ad.get('PRIMARYCACHE', ad.get('L1CACHE', '-')), "L2": ad.get('SECONDARYCACHE', ad.get('L2CACHE', '-')), "L3": ad.get('TERTIARYCACHE', ad.get('L3CACHE', '-')), "Microcode": ad.get('MICROCODEVERSION', ad.get('MICROCODE', '-'))})
-            elif 'DIMM' in id or 'MEMORY' in id:
-                sz = f_sz(ad.get('SIZE', ad.get('CAPACITY', '-')))
+                    clk = f"{ad.get('CURRENTCLOCKSPEED','-')} (max {ad.get('MAXCLOCKSPEED','-')})"
+                    cp.append({"Model": m, "Clock": clk, "Cores": ad.get('NUMBEROFPROCESSORCORES', ad.get('CORECOUNT', '-')), "Threads": ad.get('NUMBEROFENABLEDTHREADS', ad.get('THREADCOUNT', '-')), "L1": ad.get('PRIMARYCACHE', ad.get('L1CACHE', '-')), "L2": ad.get('SECONDARYCACHE', ad.get('L2CACHE', '-')), "L3": ad.get('TERTIARYCACHE', ad.get('L3CACHE', '-')), "Microcode": ad.get('MICROCODEVERSION', ad.get('MICROCODE', '-'))})
+            
+            elif 'DIMM' in id_ or 'MEMORY' in id_:
+                sz = f_ram(ad.get('SIZE', ad.get('CAPACITY', '-')))
                 if sz != '-':
-                    rm.append({"Slot": ad.get('DEVICEDESCRIPTION', ad.get('NAME', id.split(':')[-1])), "Capacity": sz, "Speed": ad.get('SPEED', ad.get('OPERATINGSPEED', '-')), "Manufacturer": ad.get('MANUFACTURER', '-'), "Part Number": ad.get('PARTNUMBER', '-'), "Serial Number": ad.get('SERIALNUMBER', '-')})
-            elif 'DISK' in id or 'PHYSICALDISK' in id:
-                sz = f_sz(ad.get('SIZE', ad.get('SIZEINBYTES', ad.get('CAPACITY', '-'))))
+                    rm.append({"Slot": ad.get('DEVICEDESCRIPTION', ad.get('NAME', id_.split(':')[-1])), "Capacity": sz, "Speed": ad.get('SPEED', ad.get('OPERATINGSPEED', '-')), "Manufacturer": ad.get('MANUFACTURER', '-'), "Part Number": ad.get('PARTNUMBER', '-'), "Serial Number": ad.get('SERIALNUMBER', '-')})
+            
+            elif 'DISK' in id_ or 'PHYSICALDISK' in id_:
+                sz = f_dsk(ad.get('SIZE', ad.get('SIZEINBYTES', ad.get('CAPACITY', '-'))))
                 if sz != '-':
-                    dk.append({"Name": ad.get('NAME', ad.get('DEVICEDESCRIPTION', id.split(':')[-1])), "State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Capacity": sz, "Media Type": ad.get('MEDIATYPE', '-'), "Protocol": ad.get('BUSPROTOCOL', '-'), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Product ID": ad.get('PRODUCTID', '-')})
-            elif any(x in id for x in ['RAID', 'AHCI', 'CONTROLLER']):
+                    slot = ad.get('FQDD', id_)
+                    dk.append({"Slot": slot, "RAID State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": ad.get('MODEL', ad.get('PRODUCTID', '-')), "Size": sz, "Serial": ad.get('SERIALNUMBER', '-'), "SAS Address": ad.get('SASADDRESS', '-'), "Firmware": ad.get('REVISION', ad.get('FIRMWAREVERSION', '-'))})
+            
+            elif any(x in id_ for x in ['RAID', 'AHCI', 'CONTROLLER']):
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if nm != '-' and 'USB' not in nm.upper(): ct.append({"Device": nm, "Firmware": ad.get('FIRMWAREVERSION', '-'), "Driver": ad.get('DRIVERVERSION', '-')})
-            elif 'NIC' in id or 'ETHERNET' in id:
+            
+            elif 'NIC' in id_ or 'ETHERNET' in id_:
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if nm != '-': nc.append({"Device": nm, "MAC Address": ad.get('CURRENTMACADDRESS', ad.get('MACADDRESS', '-')), "Link Status": ad.get('LINKSTATUS', '-')})
 
-        def fn(dl):
-            sn = set(); rs = []
-            for d in dl:
-                t = tuple(d.items())
-                if t not in sn: sn.add(t); rs.append(d)
-            return [{"Index": i+1, **d} for i, d in enumerate(rs)]
+        # เพิ่มคอลัมน์ Index อัตโนมัติ
+        def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
 
-        return {"System Information": [{"Attribute": k, "Value": v} for k, v in si.items()], "Processors": fn(cp), "Memory": fn(rm), "Physical Disks": fn(dk), "Controller Cards": fn(ct), "Network Interfaces": fn(nc)}
+        return {
+            "System Information": [{"Attribute": k, "Value": v} for k, v in si.items()],
+            "Processors": add_idx(cp),
+            "Memory": add_idx(rm),
+            "Physical Disks": add_idx(dk),
+            "Controller Cards": add_idx(ct),
+            "Network Interfaces": add_idx(nc)
+        }
     except Exception as e:
         st.error(f"Error: {e}")
         return {}
@@ -148,4 +175,4 @@ if uf:
                 st.download_button("📥 ดาวน์โหลด Word", data=df, file_name=f"Summary_{stg}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             except Exception as e: st.error(f"Error: {e}")
 
-# --- จบโค้ดตรงนี้ชัวร์ 100% ---
+# --- จบไฟล์ ---
