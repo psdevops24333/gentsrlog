@@ -71,7 +71,9 @@ def parse_tsr_log(uploaded_file):
                     except: pass
 
         # 3. จัดกลุ่มและสร้างคอลัมน์ให้เหมือน HTML Report
-        sys_info, cpus, rams, disks, ctrls, nics, fcs = {}, [], [], [], [], [], []
+        # แก้ไขบั๊กตัวแปร sys_info ตรงนี้ครับ สร้างเป็นค่าตั้งต้นไว้เลย
+        sys_info = {"Model": "-", "Service Tag": "-", "Hostname": "-", "IP iDRAC": "-"}
+        cpus, rams, disks, ctrls, nics, fcs = [], [], [], [], [], []
         
         for ad in components_extracted:
             identity = ad.get("_IDENTITY_", "")
@@ -151,7 +153,7 @@ def parse_tsr_log(uploaded_file):
             return res
 
         return {
-            "System Information": [{"Attribute": k, "Value": v} for k, v in sys_dict.items()],
+            "System Information": [{"Attribute": k, "Value": v} for k, v in sys_info.items()], # แก้ไขตัวแปรตรงนี้แล้วครับ
             "Processors": finalize_table(cpus),
             "Memory": finalize_table(rams),
             "Physical Disks": finalize_table(disks),
@@ -220,28 +222,4 @@ st.subheader("ระบบแสดงผลสเปกเครื่องเ
 uploaded_file = st.file_uploader("เลือกไฟล์ TSR Log (.zip)", type=["zip"])
 
 if uploaded_file is not None:
-    with st.spinner("กำลังเจาะลึกข้อมูล Attributes ทั้งหมด..."):
-        parsed_data = parse_tsr_log(uploaded_file)
-    
-    if parsed_data:
-        for section, records in parsed_data.items():
-            if records:
-                st.markdown(f"#### 🔹 {section}")
-                # แสดงผลแบบตารางที่ซ่อน Index ด้านหน้าออก เพื่อให้คอลัมน์ "Index" ของเราเด่นขึ้น
-                st.dataframe(records, hide_index=True, use_container_width=True)
-        
-        st.write("---")
-        if st.button("🔄 ส่งออกรายงานทั้งหมดเป็นไฟล์ Word (.docx)"):
-            try:
-                docx_file = export_to_docx(parsed_data)
-                service_tag = next((item['Value'] for item in parsed_data.get("System Information", []) if item['Attribute'] == "Service Tag"), "Unknown")
-                st.download_button(
-                    label="📥 ดาวน์โหลดไฟล์ Word (.docx)",
-                    data=docx_file,
-                    file_name=f"Hardware_Summary_{service_tag}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-            except Exception as e:
-                st.error(f"ไม่สามารถสร้างไฟล์ Word ได้: {e}")
-
-# --- สิ้นสุดไฟล์ (เลื่อนดูให้แน่ใจว่าเห็นบรรทัดนี้นะครับ) ---
+    with st
