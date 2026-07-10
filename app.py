@@ -30,7 +30,7 @@ def link_st(v):
     return v if v else '-'
 
 # ==========================================
-# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (แก้ไขดักจับ Attributes)
+# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log 
 # ==========================================
 def parse_lc_log(up_file):
     try:
@@ -49,7 +49,6 @@ def parse_lc_log(up_file):
             
             logs = []
             for node in rt.iter():
-                # ดักจับทั้งแอตทริบิวต์ในโหนดหลัก <Event ...> และแท็กย่อยด้านใน
                 m_id = node.attrib.get('MessageID') or node.attrib.get('MessageId') or node.find('MessageId') or node.find('MessageID')
                 m_id_val = m_id.text.strip().upper() if hasattr(m_id, 'text') and m_id.text else str(m_id).strip().upper()
                 
@@ -142,8 +141,11 @@ def parse_tsr(up_file):
                 sz = f_dsk(ad.get('SIZE', ad.get('SIZEINBYTES', ad.get('CAPACITY', '-'))))
                 if sz != '-': dk.append({"Slot": ad.get('FQDD', id_), "RAID State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": ad.get('MODEL', ad.get('PRODUCTID', '-')), "Size": sz, "Serial": ad.get('SERIALNUMBER', '-'), "SAS Address": ad.get('SASADDRESS', '-'), "Firmware": ad.get('REVISION', ad.get('FIRMWAREVERSION', '-'))})
             elif any(x in id_ for x in ['RAID', 'AHCI', 'CONTROLLER']):
+                loc = ad.get('FQDD', id_)
+                vnd = ad.get('MANUFACTURER', ad.get('VENDORID', '-'))
                 mdl = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if mdl != '-' and 'USB' not in mdl.upper() and 'BATTERY' not in mdl.upper(): ct.append({"Location": ad.get('FQDD', id_), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": mdl, "Speed": ad.get('LINKSPEED', '-'), "Mode": ad.get('CONTROLLERMODE', '-'), "Firmware": ad.get('FIRMWAREVERSION', ad.get('PACKAGEVERSION', ad.get('VERSION', '-')))})
+                fw = ad.get('FIRMWAREVERSION', ad.get('PACKAGEVERSION', ad.get('VERSION', '-')))
+                if mdl != '-' and 'USB' not in mdl.upper() and 'BATTERY' not in mdl.upper(): ct.append({"Location": loc, "Vendor": vnd, "Model": mdl, "Speed": ad.get('LINKSPEED', '-'), "Mode": ad.get('CONTROLLERMODE', '-'), "Firmware": fw})
             elif 'NIC' in id_ or 'ETHERNET' in id_:
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if nm != '-' and 'TRANSCEIVER' not in nm.upper(): nc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-')), "Link": link_st(ad.get('LINKSTATUS', '-')), "MAC Address": ad.get('CURRENTMACADDRESS', ad.get('MACADDRESS', '-')), "Firmware": ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))})
@@ -151,10 +153,16 @@ def parse_tsr(up_file):
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if nm != '-' and 'TRANSCEIVER' not in nm.upper(): fc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-')), "Link": link_st(ad.get('LINKSTATUS', '-')), "WWN": ad.get('PORTWWN', ad.get('VIRTUALWWPN', ad.get('WWN', '-'))), "Firmware": ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))})
 
-         def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
+        def add_idx(lst): 
+            return [{"Index": i+1, **d} for i, d in enumerate(lst)]
+        
         return {"System Information": [{"Attribute": k, "Value": v} for k, v in si.items()], "Processors": add_idx(cp), "Memory": add_idx(rm), "Physical Disks": add_idx(dk), "Storage Controllers": add_idx(ct), "Ethernet": add_idx(nc), "Fibre Channel": add_idx(fc)}
-    except Exception: return {}
+    except Exception: 
+        return {}
 
+# ==========================================
+# ⚙️ 4. ฟังก์ชันส่งออกเป็น Word 
+# ==========================================
 def exp_docx(pd):
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -188,9 +196,6 @@ def exp_docx(pd):
     bf = io.BytesIO(); dc.save(bf); bf.seek(0)
     return bf
 
-# ==========================================
-# ⚙️ 4. ฟังก์ชันสร้างเอกสาร Request แบบตรงสเปก V3
-# ==========================================
 def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -200,15 +205,13 @@ def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     
     dc = Document()
     
-    # หัวข้อหลักสอดคล้องกับหัวไฟล์เอกสาร V3
     title_p = dc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    title_run = title_p.add_run("Request for Data Erase & Server Repurposing") [cite: 1]
+    title_run = title_p.add_run("Request for Data Erase & Server Repurposing")
     title_run.font.size = Pt(16)
     title_run.font.bold = True
     title_run.font.color.rgb = RGBColor(0, 51, 102)
     
-    # ---------------- ตารางที่ 1: Device Specs ----------------
     hd1 = dc.add_heading("1. ตารางข้อมูลรายละเอียดอุปกรณ์และการประเมินเวลา (Device Specifications & Execution Baseline)", level=2)
     hd1.runs[0].font.size = Pt(11)
     hd1.runs[0].font.color.rgb = RGBColor(0, 0, 0)
@@ -217,7 +220,6 @@ def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     cpu_model = hw_data.get('Processors', [{}])[0].get('Model', '-') if hw_data.get('Processors') else '-'
     disks = hw_data.get('Physical Disks', [])
     
-    # บันทึกรายละเอียดดิสก์ทั้งหมด
     disk_details = f"Cryptographic Erase Disks (จำนวน {len(disks)} ลูก): "
     if disks:
         disk_details += ", ".join([f"Slot {d.get('Slot','-')} ({d.get('Size','-')})" for d in disks])
@@ -245,35 +247,33 @@ def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
         r[0].text, r[1].text = k, v
     dc.add_paragraph()
 
-    # ---------------- ตารางที่ 2: SOC Operation Log ----------------
-    hd2 = dc.add_heading("2. ตารางบันทึกขั้นตอนปฏิบัติงานและจุดแนบหลักฐาน (SOC Operation Log & LCC Artifact Template)", level=2) [cite: 2]
+    hd2 = dc.add_heading("2. ตารางบันทึกขั้นตอนปฏิบัติงานและจุดแนบหลักฐาน (SOC Operation Log & LCC Artifact Template)", level=2)
     hd2.runs[0].font.size = Pt(11)
     hd2.runs[0].font.color.rgb = RGBColor(0, 0, 0)
     
     tb2 = dc.add_table(rows=1, cols=4)
     tb2.style = 'Table Grid'
-    headers_t2 = ["ขั้นตอนการทำงาน (Dell LCC Process)", "เวลาเริ่ม - สิ้นสุด", "หลักฐานที่ต้องบันทึก / รหัสระบบ (Required Logs & Artifacts)", "ผลการตรวจ"] [cite: 4]
+    headers_t2 = ["ขั้นตอนการทำงาน (Dell LCC Process)", "เวลาเริ่ม - สิ้นสุด", "หลักฐานที่ต้องบันทึก / รหัสระบบ (Required Logs & Artifacts)", "ผลการตรวจ"]
     for i, h in enumerate(headers_t2):
         tb2.rows[0].cells[i].text = h
         tb2.rows[0].cells[i].paragraphs[0].runs[0].font.bold = True
     
-    # ดึงเวลาเฉพาะเจาะจงตามเงื่อนไข SYS Code
     def filter_timestamps(codes):
         ts = [l['Time'] for l in lc_logs if l['Code'] in codes and l['Time'] != '-']
-        if not ts: return "___________", "_________", "[ ] Pass\n[ ] Fail" [cite: 4]
+        if not ts: return "___________", "_________", "[ ] Pass\n[ ] Fail"
         ts.sort()
         return ts[0], ts[-1], "[X] Pass\n[ ] Fail"
 
     s1_s, s1_e, s1_r = filter_timestamps(['SYS1000', 'SYS162'])
-    s2_s, s2_e, s2_r = filter_timestamps(['SYS150']) # ดึงส่วน System Erase Job
+    s2_s, s2_e, s2_r = filter_timestamps(['SYS150']) 
     s3_s, s3_e, s3_r = filter_timestamps(['SYS144', 'SYS146', 'SYS153'])
     s4_s, s4_e, s4_r = filter_timestamps(['SYS201', 'SYS151', 'SYS1001'])
 
     t2_rows = [
-        ("1. Pre-Check & Initial Power On\nเปิดเซิร์ฟเวอร์เพื่อเตรียมทำ System Erase Tasks", f"เริ่ม: {s1_s}\nสิ้นสุด: {s1_e}", "- ยืนยันรหัส Log:  SYS1000  (System is turning on)\n- ยืนยันรหัส Log:  SYS162  (Turning on the server for System Erase Tasks)", s1_r), [cite: 4]
-        ("2. Launch Repurpose or Retire System\nเข้าเมนูตั้งค่าและเลือกส่วนประกอบที่ต้องการลบถาวร", f"เริ่ม: {s2_s}\nสิ้นสุด: {s2_e}", "- เลือกฟังก์ชัน:  BIOS reset default, iDRAC reset, Lifecycle Controller Data, Storage Components, Cryptographic Erase Disks", s2_r), [cite: 4]
-        ("3. Storage Data Erasing (Crypto Erase)\nระบบทำการลบข้อมูลบน Drives และ Hardware Cache", f"เริ่ม: {s3_s}\nสิ้นสุด: {s3_e}", "- ยืนยันรหัส Log:  SYS144  (Starting controller hardware cache data erase)\n- ยืนยันรหัส Log:  SYS146  (Starting cryptographic erase-capable drive erase)\n- ยืนยันรหัส Log:  SYS153  (Deleting hardware cache data for controller)", s3_r), [cite: 4]
-        ("4. Job Verification & Completion Status\nลบข้อมูลเสร็จสมบูรณ์และระบบสั่งปิดการทำงานตัวเครื่อง", f"เริ่ม: {s4_s}\nสิ้นสุด: {s4_e}", "- ยืนยันรหัส Log:  SYS201  (Disk erase operation successfully completed)\n- ยืนยันรหัส Log:  SYS150  (Erase operations successfully completed)\n- ยืนยันรหัส Log:  SYS151  (Completed System Erase)\n- ยืนยันรหัส Log:  SYS1001  (System is turning off)", s4_r) [cite: 4]
+        ("1. Pre-Check & Initial Power On\nเปิดเซิร์ฟเวอร์เพื่อเตรียมทำ System Erase Tasks", f"เริ่ม: {s1_s}\nสิ้นสุด: {s1_e}", "- ยืนยันรหัส Log:  SYS1000  (System is turning on)\n- ยืนยันรหัส Log:  SYS162  (Turning on the server for System Erase Tasks)", s1_r),
+        ("2. Launch Repurpose or Retire System\nเข้าเมนูตั้งค่าและเลือกส่วนประกอบที่ต้องการลบถาวร", f"เริ่ม: {s2_s}\nสิ้นสุด: {s2_e}", "- เลือกฟังก์ชัน:  BIOS reset default, iDRAC reset, Lifecycle Controller Data, Storage Components, Cryptographic Erase Disks", s2_r),
+        ("3. Storage Data Erasing (Crypto Erase)\nระบบทำการลบข้อมูลบน Drives และ Hardware Cache", f"เริ่ม: {s3_s}\nสิ้นสุด: {s3_e}", "- ยืนยันรหัส Log:  SYS144  (Starting controller hardware cache data erase)\n- ยืนยันรหัส Log:  SYS146  (Starting cryptographic erase-capable drive erase)\n- ยืนยันรหัส Log:  SYS153  (Deleting hardware cache data for controller)", s3_r),
+        ("4. Job Verification & Completion Status\nลบข้อมูลเสร็จสมบูรณ์และระบบสั่งปิดการทำงานตัวเครื่อง", f"เริ่ม: {s4_s}\nสิ้นสุด: {s4_e}", "- ยืนยันรหัส Log:  SYS201  (Disk erase operation successfully completed)\n- ยืนยันรหัส Log:  SYS150  (Erase operations successfully completed)\n- ยืนยันรหัส Log:  SYS151  (Completed System Erase)\n- ยืนยันรหัส Log:  SYS1001  (System is turning off)", s4_r)
     ]
     for r_data in t2_rows:
         row = tb2.add_row().cells
@@ -281,16 +281,15 @@ def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
             row[idx].text = text
     dc.add_paragraph()
 
-    # ---------------- ส่วน Compliance ท้ายไฟล์ ----------------
-    hd3 = dc.add_heading("3. ข้อควรระวังและการส่งมอบ Artifact (Security Audit Compliance)", level=2) [cite: 5]
+    hd3 = dc.add_heading("3. ข้อควรระวังและการส่งมอบ Artifact (Security Audit Compliance)", level=2)
     hd3.runs[0].font.size = Pt(11)
     hd3.runs[0].font.color.rgb = RGBColor(0, 0, 0)
     
     p3 = dc.add_paragraph()
-    p3.add_run("การเก็บรักษาหลักฐาน (Artifact Retention): ").bold = True [cite: 6]
-    p3.add_run("หลังจากทีม SOC ดำเนินการล้างข้อมูลเสร็จสิ้น จะต้องทำการส่งภาพถ่ายหน้าจอสรุปผลจากหน้าจอ Lifecycle Controller และทำการ Export ไฟล์ iDRAC Lifecycle Log ที่ระบุรหัส SYS146, SYS201, SYS150 และ SYS151 พร้อมเวลา Time Stamp เพื่อใช้แนบท้ายเป็นเอกสารปิดงาน (Artifact Check-off)\n\n") [cite: 6]
-    p3.add_run("ความรวดเร็วของกระบวนการ: ").bold = True [cite: 7]
-    p3.add_run("เนื่องจากตัวเครื่องใช้ระบบ Cryptographic Erase ร่วมกับ NVMe/Supported Disks กระบวนการทางเทคนิคบนดิสก์จริงจะใช้เวลาสั้นมาก (ประมาณ 10 นาที) หากใน Log แสดงเวลาดำเนินการเกินกว่าระยะเวลาปกติอย่างมีนัยสำคัญ ให้ทีม SOC ตรวจสอบประสิทธิภาพการทำงานของ Storage Controller เพิ่มเติม") [cite: 7]
+    p3.add_run("การเก็บรักษาหลักฐาน (Artifact Retention): ").bold = True
+    p3.add_run("หลังจากทีม SOC ดำเนินการล้างข้อมูลเสร็จสิ้น จะต้องทำการส่งภาพถ่ายหน้าจอสรุปผลจากหน้าจอ Lifecycle Controller และทำการ Export ไฟล์ iDRAC Lifecycle Log ที่ระบุรหัส SYS146, SYS201, SYS150 และ SYS151 พร้อมเวลา Time Stamp เพื่อใช้แนบท้ายเป็นเอกสารปิดงาน (Artifact Check-off)\n\n")
+    p3.add_run("ความรวดเร็วของกระบวนการ: ").bold = True
+    p3.add_run("เนื่องจากตัวเครื่องใช้ระบบ Cryptographic Erase ร่วมกับ NVMe/Supported Disks กระบวนการทางเทคนิคบนดิสก์จริงจะใช้เวลาสั้นมาก (ประมาณ 10 นาที) หากใน Log แสดงเวลาดำเนินการเกินกว่าระยะเวลาปกติอย่างมีนัยสำคัญ ให้ทีม SOC ตรวจสอบประสิทธิภาพการทำงานของ Storage Controller เพิ่มเติม")
 
     bf = io.BytesIO(); dc.save(bf); bf.seek(0)
     return bf
@@ -310,7 +309,6 @@ if uf:
 
     tab1, tab2 = st.tabs(["📊 1. Hardware Summary (สเปกเครื่อง)", "🛡️ 2. Data Erase Audit (ตรวจสอบการลบข้อมูล)"])
     
-    # ------------------- TAB 1 -------------------
     with tab1:
         if hw_data:
             st.success("✅ โหลดข้อมูลฮาร์ดแวร์สำเร็จ!")
@@ -318,10 +316,21 @@ if uf:
                 if r:
                     st.markdown(f"#### 🔹 {s}")
                     st.dataframe(r, hide_index=True, use_container_width=True)
+            
+            st.write("---")
+            if st.button("🔄 ส่งออกรายงานฮาร์ดแวร์เป็น Word"):
+                try:
+                    df = exp_docx(hw_data)
+                    sys_info = hw_data.get("System Information", [])
+                    hn = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
+                    stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
+                    fn = f"{hn}_{stg}.docx".replace(" ", "_").replace("/", "-")
+                    
+                    st.download_button("📥 ดาวน์โหลด Word (Hardware)", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                except Exception as e: st.error(f"Error: {e}")
 
-    # ------------------- TAB 2 -------------------
     with tab2:
-        st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)") [cite: 6]
+        st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)")
         
         if lc_logs.get("status") == "not_found":
             st.warning("⚠️ ไม่พบไฟล์ Lclog.xml หรือ LifecycleLog.xml ใน ZIP นี้")
