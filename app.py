@@ -216,4 +216,4 @@ def export_to_docx(data):
         shd = OxmlElement('w:shd')
         shd.set(qn('w:val'), 'clear')
         shd.set(qn('w:color'), 'auto')
-        shd.set(qn('w:fill'), "
+        shd.set(qn('w:fill'), "1A5276")
