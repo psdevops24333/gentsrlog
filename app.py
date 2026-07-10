@@ -121,7 +121,7 @@ def export_to_docx(data):
     return docx_buffer
 
 # --- ส่วนการแสดงผลบนหน้าเว็บ (Streamlit UI) ---
-st.set_page_config(page_title="TSR Log Hardware Inventory Extractor", page_icon="🖥️", layout="padded")
+st.set_page_config(page_title="TSR Log Hardware Inventory Extractor", page_icon="🖥️", layout="wide")
 
 st.title("🖥️ TSR Log Hardware Inventory Extractor")
 st.subheader("อัปโหลดไฟล์ Dell TSR Log (.zip) เพื่อดึงข้อมูลฮาร์ดแวร์สำคัญ")
