@@ -135,3 +135,35 @@ def parse_tsr_log(uploaded_file):
                                 
                             for child in comp:
                                 tag = child.tag.split('}')[-1].upper()
+                                name_attr = child.get('Name') or child.get('NAME')
+                                
+                                if tag in ['PROPERTY', 'ATTRIBUTE'] and name_attr:
+                                    key = name_attr.upper()
+                                    val_text = ""
+                                    for sub in child:
+                                        if sub.tag.split('}')[-1].upper() == 'VALUE' and sub.text:
+                                            val_text = sub.text.strip()
+                                    if val_text:
+                                        attr_dict[key] = val_text
+                                    elif child.text and child.text.strip():
+                                        attr_dict[key] = child.text.strip()
+                                else:
+                                    if child.text and child.text.strip():
+                                        attr_dict[tag] = child.text.strip()
+                            
+                            comp_tag = comp.tag.split('}')[-1].upper()
+                            identity = attr_dict.get('INSTANCEID', attr_dict.get('FQDD', attr_dict.get('DEVICEID', comp_tag))).upper()
+
+                            if identity not in ['PROPERTY', 'VALUE', 'ATTRIBUTE']:
+                                
+                                if 'SYSTEM' in identity or 'BOARD' in identity or 'DCIM_SYSTEMVIEW' in identity:
+                                    if attr_dict.get('MODEL') and hardware_data['Model'] == '-': hardware_data['Model'] = attr_dict['MODEL']
+                                    if attr_dict.get('SERVICETAG') and hardware_data['Serial Number (Service Tag)'] == '-': hardware_data['Serial Number (Service Tag)'] = attr_dict['SERVICETAG']
+                                    if attr_dict.get('HOSTNAME') and hardware_data['Hostname'] == '-': hardware_data['Hostname'] = attr_dict['HOSTNAME']
+                                    
+                                elif 'IPV4' in identity or 'IDRAC' in identity:
+                                    ip = attr_dict.get('CURRENTIPADDRESS', attr_dict.get('ADDRESS'))
+                                    if ip and ip not in ['0.0.0.0', '::', '127.0.0.1'] and hardware_data['IP iDRAC'] == '-':
+                                        hardware_data['IP iDRAC'] = ip
+                                        
+                                # แกะ CPU ให้ละเอียดขึ้น
