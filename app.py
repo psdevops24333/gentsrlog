@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import json
 import io
 
+# --- ฟังก์ชันหลักในการแกะข้อมูลแบบครอบคลุมทั้ง XML และไฟล์แยกส่วน ---
 def parse_tsr_log(uploaded_file):
     hardware_data = {
         "Model": "-",
@@ -25,7 +26,7 @@ def parse_tsr_log(uploaded_file):
         with zipfile.ZipFile(uploaded_file, 'r') as outer_z:
             all_files = outer_z.namelist()
             
-            # --- ตรวจสอบว่ามีไฟล์ ZIP ซ้อนอยู่ข้างในหรือไม่ (Nested ZIP) ---
+            # ตรวจสอบโครงสร้าง ZIP ซ้อนภายใน (Nested ZIP)
             inner_zip_name = None
             for fname in all_files:
                 if fname.lower().endswith('.zip'):
@@ -44,9 +45,6 @@ def parse_tsr_log(uploaded_file):
                 st.write(f"จำนวนไฟล์ทั้งหมดที่ค้นหา: {len(target_files)} ไฟล์")
                 st.code("\n".join(target_files[:30]))
 
-            # -------------------------------------------------------------
-            # รวบรวมไฟล์ที่เกี่ยวข้องทั้งหมด
-            # -------------------------------------------------------------
             inventory_json_file = None
             xml_files_to_parse = []
             
@@ -54,166 +52,18 @@ def parse_tsr_log(uploaded_file):
                 fname_lower = fname.lower()
                 if 'hardware_inventory.json' in fname_lower or 'hw_inventory.json' in fname_lower:
                     inventory_json_file = fname
-                    break # ถ้าเจอ JSON หลักให้ใช้เลย
+                    break
                 
-                # ถ้าระบบเก็บแบบไฟล์เดียว
                 if 'inventory.xml' in fname_lower or 'hw_inventory.xml' in fname_lower:
                     xml_files_to_parse = [fname]
                     break
                     
-                # ถ้าระบบเก็บแบบแยกส่วน (DCIM Views) ตามภาพของคุณ
                 if 'sysinfo_' in fname_lower and fname_lower.endswith('.xml'):
                     xml_files_to_parse.append(fname)
 
-            # -------------------------------------------------------------
-            # ทางเลือกที่ 1: แกะไฟล์ JSON
-            # -------------------------------------------------------------
+            # --- กรณีที่ 1: จัดการไฟล์แบบ JSON ---
             if inventory_json_file:
                 st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}`")
                 json_data = json.loads(target_z.read(inventory_json_file).decode('utf-8', errors='ignore'))
                 system_inventory = json_data.get("SystemInventory", json_data)
-                components = system_inventory.get("Component", [])
-                if isinstance(components, dict): components = [components]
-                
-                for comp in components:
-                    fqdd = comp.get("@FQDD", comp.get("FQDD", ""))
-                    attributes = comp.get("Attribute", [])
-                    if isinstance(attributes, dict): attributes = [attributes]
-                        
-                    attr_dict = {attr.get("@Name", attr.get("Name")): attr.get("#text", attr.get("Value", attr.get("text"))) for attr in attributes if attr.get("@Name", attr.get("Name"))}
-
-                    if "System.Board" in fqdd:
-                        if "Model" in attr_dict: hardware_data["Model"] = attr_dict["Model"]
-                        if "ServiceTag" in attr_dict: hardware_data["Serial Number (Service Tag)"] = attr_dict["ServiceTag"]
-                    elif "iDRAC.Embedded" in fqdd and "HostName" in attr_dict:
-                        hardware_data["Hostname"] = attr_dict["HostName"]
-                    elif "IPv4." in fqdd and "Address" in attr_dict and attr_dict["Address"] != "0.0.0.0":
-                        hardware_data["IP iDRAC"] = attr_dict["Address"]
-                    elif "CPU.Socket" in fqdd and "Model" in attr_dict:
-                        cpu_list.append(attr_dict["Model"])
-                    elif "DIMM.Socket" in fqdd and attr_dict.get("Size") not in ["0 MB", "0", "-", None]:
-                        ram_list.append(f"{attr_dict.get('Size')} ({attr_dict.get('Speed', '')})")
-                    elif ("Disk." in fqdd or "PhysicalDisk." in fqdd) and "Size" in attr_dict:
-                        disk_list.append(f"{attr_dict['Size']} {attr_dict.get('MediaType', '')}")
-                    elif ("RAID." in fqdd or "AHCI." in fqdd) and "ProductName" in attr_dict:
-                        controller_list.append(attr_dict["ProductName"])
-                    elif "NIC." in fqdd and "ProductName" in attr_dict:
-                        nic_list.append(attr_dict["ProductName"])
-                    elif ("FC." in fqdd or "FibreChannel." in fqdd) and "ProductName" in attr_dict:
-                        fc_list.append(attr_dict["ProductName"])
-
-            # -------------------------------------------------------------
-            # ทางเลือกที่ 2: แกะไฟล์ XML (รองรับทั้งไฟล์เดี่ยว และไฟล์แยกส่วนแบบ DCIM View)
-            # -------------------------------------------------------------
-            elif xml_files_to_parse:
-                if len(xml_files_to_parse) > 1:
-                    st.info(f"📄 ตรวจพบไฟล์ Inventory แบบแยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังประกอบร่างข้อมูล...)")
-                else:
-                    st.info(f"📄 ตรวจพบไฟล์ XML หลัก: `{xml_files_to_parse[0]}`")
-
-                for fname in xml_files_to_parse:
-                    xml_content = target_z.read(fname)
-                    root = ET.fromstring(xml_content)
-                    
-                    # ลบ Namespace ออกให้หมดเพื่อให้อ่านง่าย
-                    for elem in root.iter():
-                        if '}' in elem.tag:
-                            elem.tag = elem.tag.split('}', 1)[1]
-                    
-                    # ดักจับ Component ทุกรูปแบบ (ทั้งแบบ <Component> และแบบ <DCIM_...View>)
-                    for comp in root.iter():
-                        fqdd = None
-                        attr_dict = {}
-                        
-                        # รูปแบบที่ 1: <Component FQDD="...">
-                        if comp.tag == 'Component' and comp.get('FQDD'):
-                            fqdd = comp.get('FQDD')
-                            for attr in comp.findall('Attribute'):
-                                if attr.get('Name'): attr_dict[attr.get('Name')] = attr.text
-                        # รูปแบบที่ 2: <DCIM_CPUView><FQDD>...</FQDD>
-                        else:
-                            fqdd_elem = comp.find('FQDD')
-                            if fqdd_elem is not None:
-                                fqdd = fqdd_elem.text
-                                for child in comp:
-                                    attr_dict[child.tag] = child.text
-
-                        # ถ้าเจอ FQDD ให้ทำการ Map ข้อมูล
-                        if fqdd:
-                            if 'System.Board' in fqdd:
-                                if 'Model' in attr_dict: hardware_data['Model'] = attr_dict['Model']
-                                if 'ServiceTag' in attr_dict: hardware_data['Serial Number (Service Tag)'] = attr_dict['ServiceTag']
-                            elif 'iDRAC.Embedded' in fqdd and 'HostName' in attr_dict:
-                                hardware_data['Hostname'] = attr_dict['HostName']
-                            elif 'IPv4.' in fqdd and 'Address' in attr_dict and attr_dict['Address'] != '0.0.0.0':
-                                hardware_data['IP iDRAC'] = attr_dict['Address']
-                            elif 'CPU.Socket' in fqdd and 'Model' in attr_dict:
-                                cpu_list.append(attr_dict['Model'])
-                            elif 'DIMM.Socket' in fqdd:
-                                size = attr_dict.get('Size')
-                                speed = attr_dict.get('Speed', '')
-                                if size and size not in ['0 MB', '0', '0 Bytes', '-', 'None']:
-                                    ram_list.append(f"{size} ({speed})")
-                            elif 'Disk.' in fqdd or 'PhysicalDisk.' in fqdd:
-                                size = attr_dict.get('Size') or attr_dict.get('SizeInBytes')
-                                media = attr_dict.get('MediaType', '')
-                                if size and str(size) not in ['0', '0 Bytes']:
-                                    disk_list.append(f"{size} {media}")
-                            elif ('RAID.' in fqdd or 'AHCI.' in fqdd) and 'ProductName' in attr_dict:
-                                controller_list.append(attr_dict['ProductName'])
-                            elif 'NIC.' in fqdd and 'ProductName' in attr_dict:
-                                nic_list.append(attr_dict['ProductName'])
-                            elif ('FC.' in fqdd or 'FibreChannel.' in fqdd) and 'ProductName' in attr_dict:
-                                fc_list.append(attr_dict['ProductName'])
-            else:
-                st.warning("⚠️ ไม่พบไฟล์ Inventory หรือแฟ้มข้อมูลฮาร์ดแวร์ภายใน ZIP นี้เลยครับ")
-
-        # สรุปผลข้อมูลจัดกลุ่ม (Grouping) กำจัดตัวซ้ำ
-        if cpu_list: 
-            unique_cpus = list(set(cpu_list))
-            hardware_data['CPU'] = f"{len(cpu_list)}x {unique_cpus[0]}" if unique_cpus else cpu_list[0]
-        if ram_list: 
-            hardware_data['RAM'] = f"{len(ram_list)} DIMMs (เช่น {ram_list[0]})"
-        if disk_list: 
-            hardware_data['Physical Disk'] = f"รวม {len(disk_list)} ลูก (เช่น {disk_list[0]})"
-        if controller_list: 
-            hardware_data['Controller Card'] = ", ".join(list(set(controller_list)))
-        if nic_list: 
-            hardware_data['Interface LAN'] = ", ".join(list(set(nic_list)))
-        if fc_list: 
-            hardware_data['FC Channel'] = ", ".join(list(set(fc_list)))
-        
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการประมวลผลไฟล์: {e}")
-        
-    return hardware_data
-
-def export_to_docx(data):
-    from docx import Document
-    from docx.shared import Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    
-    doc = Document()
-    title_p = doc.add_paragraph()
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run("Lifecycle Log Summary Inventory")
-    title_run.font.size = Pt(18)
-    title_run.font.bold = True
-    title_run.font.color.rgb = RGBColor(26, 82, 118)
-    
-    table = doc.add_table(rows=1, cols=2)
-    table.style = 'Table Grid'
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Hardware Component'
-    hdr_cells[1].text = 'Details / Value'
-    
-    for cell in hdr_cells:
-        cell.paragraphs[0].runs[0].font.bold = True
-        cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-        tcPr = cell._tc.get_or_add_tcPr()
-        shd = OxmlElement('w:shd')
-        shd.set(qn('w:val'), 'clear')
-        shd.set(qn('w:color'), 'auto')
-        shd.set(qn('w:fill'), "1A5276")
+                components = system_
