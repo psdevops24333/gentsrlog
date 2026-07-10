@@ -22,20 +22,38 @@ def parse_tsr_log(uploaded_file):
     nic_list, fc_list, controller_list = [], [], []
     
     try:
-        with zipfile.ZipFile(uploaded_file, 'r') as z:
-            all_files = z.namelist()
+        with zipfile.ZipFile(uploaded_file, 'r') as outer_z:
+            all_files = outer_z.namelist()
             
-            # --- DEBUG: แสดงรายชื่อไฟล์ 15 ไฟล์แรกใน ZIP เพื่อตรวจสอบโครงสร้าง ---
+            # --- ตรวจสอบว่ามีไฟล์ ZIP ซ้อนอยู่ข้างในหรือไม่ (Nested ZIP) ---
+            inner_zip_name = None
+            for fname in all_files:
+                if fname.lower().endswith('.zip'):
+                    inner_zip_name = fname
+                    break
+            
+            # ถ้ามี ZIP ซ้อนอยู่ ให้แตกไฟล์ ZIP ชั้นในออกมาไว้ใน Memory
+            if inner_zip_name:
+                inner_zip_bytes = io.BytesIO(outer_z.read(inner_zip_name))
+                target_z = zipfile.ZipFile(inner_zip_bytes, 'r')
+                target_files = target_z.namelist()
+            else:
+                target_z = outer_z
+                target_files = all_files
+
+            # --- DEBUG ---
             with st.expander("🔍 ดูโครงสร้างไฟล์ภายใน TSR ZIP (สำหรับตรวจสอบ)"):
-                st.write(f"จำนวนไฟล์ทั้งหมดใน ZIP: {len(all_files)} ไฟล์")
+                if inner_zip_name:
+                    st.success(f"📂 ตรวจพบ ZIP ซ้อนด้านใน: `{inner_zip_name}` (กำลังอ่านไฟล์จากชั้นนี้)")
+                st.write(f"จำนวนไฟล์ทั้งหมดที่ค้นหา: {len(target_files)} ไฟล์")
                 st.write("ตัวอย่างรายชื่อไฟล์ภายใน:")
-                st.code("\n".join(all_files[:15]))
-            
-            # ค้นหาไฟล์เป้าหมาย (รองรับทั้ง XML และ JSON)
+                st.code("\n".join(target_files[:30]))
+
+            # ค้นหาไฟล์เป้าหมาย (รองรับทั้ง XML และ JSON) จากไฟล์ ZIP ชั้นที่ถูกต้อง
             inventory_xml_file = None
             inventory_json_file = None
             
-            for fname in all_files:
+            for fname in target_files:
                 fname_lower = fname.lower()
                 if 'inventory.xml' in fname_lower or 'hw_inventory.xml' in fname_lower:
                     inventory_xml_file = fname
@@ -43,17 +61,15 @@ def parse_tsr_log(uploaded_file):
                     inventory_json_file = fname
 
             # -------------------------------------------------------------
-            # ทางเลือกที่ 1: แกะไฟล์ JSON (สำหรับ iDRAC รุ่นใหม่/เฟิร์มแวร์ใหม่)
+            # ทางเลือกที่ 1: แกะไฟล์ JSON
             # -------------------------------------------------------------
             if inventory_json_file:
-                st.info(f"📂 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}` กำลังประมวลผล...")
-                json_data = json.loads(z.read(inventory_json_file).decode('utf-8', errors='ignore'))
+                st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}`")
+                json_data = json.loads(target_z.read(inventory_json_file).decode('utf-8', errors='ignore'))
                 
-                # พยายามดักจับข้อมูลแบบ Generic จาก JSON Object
-                # ดึงจากโครงสร้างหลักของ Dell JSON
                 system_inventory = json_data.get("SystemInventory", json_data)
                 components = system_inventory.get("Component", [])
-                if isinstance(components, dict):  # บางครั้งเป็น Object ตัวเดียว
+                if isinstance(components, dict): 
                     components = [components]
                 
                 for comp in components:
@@ -69,7 +85,6 @@ def parse_tsr_log(uploaded_file):
                         if name and value:
                             attr_dict[name] = value
 
-                    # ทำการ Map ข้อมูล
                     if "System.Board" in fqdd:
                         if "Model" in attr_dict: hardware_data["Model"] = attr_dict["Model"]
                         if "ServiceTag" in attr_dict: hardware_data["Serial Number (Service Tag)"] = attr_dict["ServiceTag"]
@@ -91,14 +106,13 @@ def parse_tsr_log(uploaded_file):
                         fc_list.append(attr_dict["ProductName"])
 
             # -------------------------------------------------------------
-            # ทางเลือกที่ 2: แกะไฟล์ XML (สำหรับ iDRAC ทั่วไป)
+            # ทางเลือกที่ 2: แกะไฟล์ XML
             # -------------------------------------------------------------
             elif inventory_xml_file:
-                st.info(f"📂 ตรวจพบไฟล์ข้อมูลแบบ XML: `{inventory_xml_file}` กำลังประมวลผล...")
-                xml_content = z.read(inventory_xml_file)
+                st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ XML: `{inventory_xml_file}`")
+                xml_content = target_z.read(inventory_xml_file)
                 root = ET.fromstring(xml_content)
                 
-                # ลบ XML Namespaces
                 for elem in root.iter():
                     if '}' in elem.tag:
                         elem.tag = elem.tag.split('}', 1)[1]
@@ -141,7 +155,7 @@ def parse_tsr_log(uploaded_file):
                         if prod is not None: fc_list.append(prod.text)
             
             else:
-                st.warning("⚠️ ไม่พบไฟล์ `inventory.xml` หรือ `hardware_inventory.json` ในระบบกรุณาตรวจสอบไฟล์ ZIP")
+                st.warning("⚠️ ไม่พบไฟล์ `inventory.xml` หรือ `hardware_inventory.json` ในระบบกรุณาตรวจสอบไฟล์ ZIP อีกครั้ง")
 
         # สรุปผลข้อมูลจัดกลุ่ม (Grouping)
         if cpu_list: hardware_data['CPU'] = f"{len(cpu_list)}x {cpu_list[0]}"
