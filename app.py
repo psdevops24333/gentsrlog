@@ -94,7 +94,6 @@ def parse_tsr(up_file):
                     clk = f"{ad.get('CURRENTCLOCKSPEED','-')} (max {ad.get('MAXCLOCKSPEED','-')})"
                     cp.append({"Model": m, "Clock": clk, "Cores": ad.get('NUMBEROFPROCESSORCORES', ad.get('CORECOUNT', '-')), "Threads": ad.get('NUMBEROFENABLEDTHREADS', ad.get('THREADCOUNT', '-')), "L1": ad.get('PRIMARYCACHE', ad.get('L1CACHE', '-')), "L2": ad.get('SECONDARYCACHE', ad.get('L2CACHE', '-')), "L3": ad.get('TERTIARYCACHE', ad.get('L3CACHE', '-')), "Microcode": ad.get('MICROCODEVERSION', ad.get('MICROCODE', '-'))})
             
-            # เปลี่ยน Capacity เป็น Size ตามที่ต้องการ
             elif 'DIMM' in id_ or 'MEMORY' in id_:
                 sz = f_ram(ad.get('SIZE', ad.get('CAPACITY', '-')))
                 if sz != '-':
@@ -106,7 +105,6 @@ def parse_tsr(up_file):
                     slot = ad.get('FQDD', id_)
                     dk.append({"Slot": slot, "RAID State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": ad.get('MODEL', ad.get('PRODUCTID', '-')), "Size": sz, "Serial": ad.get('SERIALNUMBER', '-'), "SAS Address": ad.get('SASADDRESS', '-'), "Firmware": ad.get('REVISION', ad.get('FIRMWAREVERSION', '-'))})
             
-            # ดึง Firmware ออกมาแสดง
             elif any(x in id_ for x in ['RAID', 'AHCI', 'CONTROLLER']):
                 loc = ad.get('FQDD', id_)
                 vnd = ad.get('MANUFACTURER', ad.get('VENDORID', '-'))
@@ -115,31 +113,26 @@ def parse_tsr(up_file):
                 if mdl != '-' and 'USB' not in mdl.upper() and 'BATTERY' not in mdl.upper():
                     ct.append({"Location": loc, "Vendor": vnd, "Model": mdl, "Speed": ad.get('LINKSPEED', '-'), "Mode": ad.get('CONTROLLERMODE', '-'), "Firmware": fw})
             
-            # ดึงค่า Link Status, ตัด Transceiver ทิ้ง
             elif 'NIC' in id_ or 'ETHERNET' in id_:
-                loc = ad.get('FQDD', id_)
-                mdl = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if mdl != '-' and 'TRANSCEIVER' not in mdl.upper():
+                nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
+                if nm != '-' and 'TRANSCEIVER' not in nm.upper():
                     spd = ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-'))
                     lk = link_st(ad.get('LINKSTATUS', '-'))
                     mac = ad.get('CURRENTMACADDRESS', ad.get('MACADDRESS', '-'))
                     fw = ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))
-                    nc.append({"Location": loc, "Model": mdl, "Speed": spd, "Link": lk, "MAC Address": mac, "Firmware": fw})
+                    nc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": spd, "Link": lk, "MAC Address": mac, "Firmware": fw})
 
-            # FC Channel
             elif 'FC' in id_ or 'FIBRECHANNEL' in id_:
-                loc = ad.get('FQDD', id_)
-                mdl = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if mdl != '-' and 'TRANSCEIVER' not in mdl.upper():
+                nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
+                if nm != '-' and 'TRANSCEIVER' not in nm.upper():
                     spd = ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-'))
                     lk = link_st(ad.get('LINKSTATUS', '-'))
                     wwn = ad.get('PORTWWN', ad.get('VIRTUALWWPN', ad.get('WWN', '-')))
                     fw = ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))
-                    fc.append({"Location": loc, "Model": mdl, "Speed": spd, "Link": lk, "WWN": wwn, "Firmware": fw})
+                    fc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": spd, "Link": lk, "WWN": wwn, "Firmware": fw})
 
         def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
 
-        # เปลี่ยนชื่อหมวดหมู่ให้ตรงเป๊ะ
         return {
             "System Information": [{"Attribute": k, "Value": v} for k, v in si.items()],
             "Processors": add_idx(cp),
@@ -162,7 +155,7 @@ def exp_docx(pd):
     dc = Document()
     tp = dc.add_paragraph()
     tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    tr = tp.add_run("TSR Log Hardware Summary")
+    tr = tp.add_run("Hardware Summary")
     tr.font.size = Pt(18); tr.font.bold = True; tr.font.color.rgb = RGBColor(26, 82, 118)
     for sn, rcs in pd.items():
         if not rcs: continue
@@ -203,8 +196,16 @@ if uf:
         if st.button("🔄 ส่งออกรายงานเป็น Word"):
             try:
                 df = exp_docx(pd)
-                stg = next((i['Value'] for i in pd.get("System Information", []) if i['Attribute'] == "Service Tag"), "Unknown")
-                st.download_button("📥 ดาวน์โหลด Word", data=df, file_name=f"Summary_{stg}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                
+                # --- ส่วนดึงค่าสำหรับตั้งชื่อไฟล์แบบไดนามิก ---
+                sys_info = pd.get("System Information", [])
+                hostname = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
+                service_tag = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
+                
+                # ทำความสะอาดชื่อไฟล์ ป้องกันบั๊กกรณีค่าเป็นขีดหรือมีช่องว่าง
+                filename = f"{hostname}_{service_tag}.docx".replace(" ", "_").replace("/", "-")
+                
+                st.download_button("📥 ดาวน์โหลด Word", data=df, file_name=filename, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             except Exception as e: st.error(f"Error: {e}")
 
 # --- จบโค้ดตรงนี้ชัวร์ 100% ---
