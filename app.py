@@ -18,7 +18,7 @@ def parse_tsr_log(uploaded_file):
         "FC Channel": "-"
     }
     
-    cpu_list, ram_list, disk_list = [], [], []
+    cpu_list, ram_list, disk_list = [], []
     nic_list, fc_list, controller_list = [], [], []
     
     try:
@@ -59,7 +59,7 @@ def parse_tsr_log(uploaded_file):
                 if 'sysinfo_' in fname_lower and fname_lower.endswith('.xml'):
                     xml_files_to_parse.append(fname)
 
-            # --- จัดการไฟล์ JSON ---
+            # --- 1. จัดการไฟล์ JSON ---
             if inventory_json_file:
                 st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}`")
                 json_data = json.loads(target_z.read(inventory_json_file).decode('utf-8', errors='ignore'))
@@ -94,87 +94,84 @@ def parse_tsr_log(uploaded_file):
                     elif ("FC." in fqdd or "FibreChannel." in fqdd) and "ProductName" in attr_dict:
                         fc_list.append(attr_dict["ProductName"])
 
-            # --- จัดการไฟล์ XML (รองรับ InstanceID แบบใหม่) ---
+            # --- 2. จัดการไฟล์ XML (ระบบควานหาข้อมูลแบบครอบจักรวาล) ---
             elif xml_files_to_parse:
-                if len(xml_files_to_parse) > 1:
-                    st.info(f"📄 ตรวจพบไฟล์ Inventory แยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังสกัดข้อมูล...)")
-                else:
-                    st.info(f"📄 ตรวจพบไฟล์ XML: `{xml_files_to_parse[0]}`")
+                st.info(f"📄 ตรวจพบไฟล์ Inventory แยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังสกัดข้อมูลแบบลึก...)")
 
                 for fname in xml_files_to_parse:
-                    xml_content = target_z.read(fname)
-                    root = ET.fromstring(xml_content)
-                    
-                    for elem in root.iter():
-                        if '}' in elem.tag:
-                            elem.tag = elem.tag.split('}', 1)[1]
-                    
-                    for comp in root.iter():
-                        # สนใจเฉพาะ Element ที่มีลูกข้างใน (เช่น <DCIM_SystemView>)
-                        if len(comp) > 0:
-                            attr_dict = {}
-                            fqdd = comp.get('FQDD')
-                            
-                            for child in comp:
-                                attr_dict[child.tag] = child.text
+                    try:
+                        xml_content = target_z.read(fname)
+                        root = ET.fromstring(xml_content)
+                        
+                        # ลบ Namespace
+                        for elem in root.iter():
+                            if '}' in elem.tag:
+                                elem.tag = elem.tag.split('}', 1)[1]
+                        
+                        for comp in root.iter():
+                            # ดึงเฉพาะก้อนที่มีข้อมูลลูกข้างใน
+                            if len(comp) > 0:
+                                attr_dict = {}
+                                for child in comp:
+                                    if child.text and child.text.strip():
+                                        attr_dict[child.tag.upper()] = child.text.strip()
                                 
-                            # ถ้ารูปแบบไม่ใช้ Attribute FQDD ให้ควานหาจาก Tag ลูก
-                            if not fqdd:
-                                fqdd = attr_dict.get('FQDD') or attr_dict.get('InstanceID') or attr_dict.get('DeviceID')
+                                # เอาชื่อ Tag พ่อ หรือ InstanceID มาเป็นตัวระบุประเภทฮาร์ดแวร์
+                                identity = attr_dict.get('INSTANCEID', attr_dict.get('FQDD', comp.tag)).upper()
 
-                            if fqdd:
-                                fqdd_upper = fqdd.upper()
-                                
-                                if 'SYSTEM.BOARD' in fqdd_upper:
-                                    if attr_dict.get('Model'): hardware_data['Model'] = attr_dict['Model']
-                                    if attr_dict.get('ServiceTag'): hardware_data['Serial Number (Service Tag)'] = attr_dict['ServiceTag']
-                                    if attr_dict.get('HostName'): hardware_data['Hostname'] = attr_dict['HostName']
+                                # กรองและยัดข้อมูลเข้าตาราง
+                                if 'SYSTEM' in identity or 'BOARD' in identity:
+                                    if attr_dict.get('MODEL'): hardware_data['Model'] = attr_dict['MODEL']
+                                    if attr_dict.get('SERVICETAG'): hardware_data['Serial Number (Service Tag)'] = attr_dict['SERVICETAG']
+                                    if attr_dict.get('HOSTNAME') and hardware_data['Hostname'] == '-': hardware_data['Hostname'] = attr_dict['HOSTNAME']
                                     
-                                elif 'IDRAC.EMBEDDED' in fqdd_upper:
-                                    if attr_dict.get('HostName') and hardware_data['Hostname'] == "-": 
-                                        hardware_data['Hostname'] = attr_dict['HostName']
+                                elif 'IPV4' in identity or 'IDRAC' in identity:
+                                    ip = attr_dict.get('CURRENTIPADDRESS', attr_dict.get('ADDRESS'))
+                                    if ip and ip != '0.0.0.0' and hardware_data['IP iDRAC'] == '-':
+                                        hardware_data['IP iDRAC'] = ip
                                         
-                                elif 'IPV4' in fqdd_upper:
-                                    addr = attr_dict.get('Address') or attr_dict.get('CurrentIPAddress')
-                                    if addr and addr != '0.0.0.0':
-                                        hardware_data['IP iDRAC'] = addr
+                                elif 'CPU' in identity:
+                                    model = attr_dict.get('MODEL', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
+                                    if model and "CPU" in model.upper(): cpu_list.append(model)
                                         
-                                elif 'CPU.SOCKET' in fqdd_upper:
-                                    model = attr_dict.get('Model') or attr_dict.get('DeviceDescription')
-                                    if model: cpu_list.append(model)
-                                    
-                                elif 'DIMM.SOCKET' in fqdd_upper:
-                                    size = attr_dict.get('Size') or attr_dict.get('Capacity')
-                                    speed = attr_dict.get('Speed') or attr_dict.get('OperatingSpeed') or ''
-                                    if size and str(size) not in ['0 MB', '0', '0 Bytes', '-', 'None']:
-                                        ram_list.append(f"{size} ({speed})")
+                                elif 'DIMM' in identity or 'MEMORY' in identity:
+                                    size = attr_dict.get('SIZE', attr_dict.get('CAPACITY'))
+                                    speed = attr_dict.get('SPEED', attr_dict.get('OPERATINGSPEED', ''))
+                                    if size and str(size) not in ['0', '0 MB', '0 Bytes', 'None', '-']:
+                                        ram_list.append(f"{size} ({speed})" if speed else str(size))
                                         
-                                elif 'DISK.' in fqdd_upper or 'PHYSICALDISK.' in fqdd_upper:
-                                    size = attr_dict.get('Size') or attr_dict.get('SizeInBytes')
-                                    media = attr_dict.get('MediaType') or ''
+                                elif 'DISK' in identity:
+                                    size = attr_dict.get('SIZE', attr_dict.get('SIZEINBYTES', attr_dict.get('CAPACITY')))
+                                    media = attr_dict.get('MEDIATYPE', '')
                                     if size and str(size) not in ['0', '0 Bytes']:
-                                        disk_list.append(f"{size} {media}")
+                                        disk_list.append(f"{size} {media}".strip())
                                         
-                                elif 'RAID.' in fqdd_upper or 'AHCI.' in fqdd_upper:
-                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
-                                    if prod: controller_list.append(prod)
+                                elif 'RAID' in identity or 'AHCI' in identity or 'CONTROLLER' in identity:
+                                    prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
+                                    if prod and 'USB' not in prod.upper(): controller_list.append(prod)
                                         
-                                elif 'NIC.' in fqdd_upper:
-                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
+                                elif 'NIC' in identity or 'ETHERNET' in identity or 'NETWORK' in identity:
+                                    prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
                                     if prod: nic_list.append(prod)
                                         
-                                elif 'FC.' in fqdd_upper or 'FIBRECHANNEL.' in fqdd_upper:
-                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
+                                elif 'FC' in identity or 'FIBRE' in identity:
+                                    prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
                                     if prod: fc_list.append(prod)
+                    except Exception as e:
+                        pass # ข้ามไฟล์ที่พังหรืออ่านไม่ได้
+
             else:
                 st.warning("⚠️ ไม่พบแฟ้มข้อมูลฮาร์ดแวร์ภายในไฟล์ ZIP นี้")
 
-        # สรุปกลุ่มข้อมูลฮาร์ดแวร์
+        # สรุปกลุ่มข้อมูลฮาร์ดแวร์ (ตัดตัวซ้ำทิ้ง)
         if cpu_list: 
             unique_cpus = list(set(cpu_list))
             hardware_data['CPU'] = f"{len(cpu_list)}x {unique_cpus[0]}" if unique_cpus else cpu_list[0]
-        if ram_list: hardware_data['RAM'] = f"{len(ram_list)} DIMMs (เช่น {ram_list[0]})"
-        if disk_list: hardware_data['Physical Disk'] = f"รวม {len(disk_list)} ลูก (เช่น {disk_list[0]})"
+        if ram_list: 
+            hardware_data['RAM'] = f"{len(ram_list)} DIMMs (เช่น {ram_list[0]})"
+        if disk_list: 
+            unique_disks = list(set(disk_list))
+            hardware_data['Physical Disk'] = f"รวม {len(disk_list)} ลูก ({', '.join(unique_disks[:2])}...)" if unique_disks else "-"
         if controller_list: hardware_data['Controller Card'] = ", ".join(list(set(controller_list)))
         if nic_list: hardware_data['Interface LAN'] = ", ".join(list(set(nic_list)))
         if fc_list: hardware_data['FC Channel'] = ", ".join(list(set(fc_list)))
