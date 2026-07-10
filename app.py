@@ -30,10 +30,9 @@ def link_st(v):
     return v if v else '-'
 
 # ==========================================
-# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (สำหรับตรวจสอบ SYS Code)
+# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (อัปเดตใหม่)
 # ==========================================
 def parse_lc_log(up_file):
-    logs = []
     try:
         with zipfile.ZipFile(up_file, 'r') as oz:
             fs = oz.namelist()
@@ -41,14 +40,19 @@ def parse_lc_log(up_file):
             tz = zipfile.ZipFile(io.BytesIO(oz.read(izn)), 'r') if izn else oz
             tfs = tz.namelist()
             
-            # ควานหาไฟล์ Lifecycle Log ภายใน ZIP
-            lcf = next((f for f in tfs if 'lifecycle' in f.lower() and f.lower().endswith('.xml')), None)
-            if not lcf: return None
+            # แก้ไข: ค้นหาทั้งคำว่า lclog และ lifecycle
+            lcf = next((f for f in tfs if ('lclog' in f.lower() or 'lifecycle' in f.lower()) and f.lower().endswith('.xml')), None)
+            
+            if not lcf: 
+                # เก็บรายชื่อไฟล์เผื่อหาไม่เจอจะได้เอามาดูว่าชื่อไฟล์อะไร
+                debug_files = [f for f in tfs if 'log' in f.lower() or 'lc' in f.lower()]
+                return {"status": "not_found", "debug": debug_files}
             
             rt = ET.fromstring(tz.read(lcf))
             for el in rt.iter():
                 if '}' in el.tag: el.tag = el.tag.split('}', 1)[1]
             
+            logs = []
             # ดึง Event ID และเวลาทั้งหมด
             for node in rt.iter():
                 m_id = node.find('MessageId')
@@ -62,11 +66,12 @@ def parse_lc_log(up_file):
                         "Time": ts.text.strip() if ts is not None else "-",
                         "Details": ms.text.strip() if ms is not None else "-"
                     })
-        return logs
-    except Exception: return []
+            return {"status": "success", "data": logs, "file_used": lcf}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # ==========================================
-# ⚙️ 3. ฟังก์ชันแกะข้อมูลฮาร์ดแวร์ (ตัวสมบูรณ์)
+# ⚙️ 3. ฟังก์ชันแกะข้อมูลฮาร์ดแวร์
 # ==========================================
 def parse_tsr(up_file):
     ex = {}
@@ -224,19 +229,16 @@ def exp_docx(pd):
 st.set_page_config(page_title="TSR Log Tool", page_icon="🖥️", layout="wide")
 st.title("🖥️ Server Inventory & Data Erase Audit Tool")
 
-# อัปโหลดไฟล์ครั้งเดียว ใช้ได้ทั้ง 2 ระบบ
 uf = st.file_uploader("อัปโหลดไฟล์ TSR Log (.zip) ของคุณที่นี่", type=["zip"])
 
 if uf:
-    # ใช้วิธี Cache แบบชั่วคราว ดึงข้อมูลเตรียมไว้ให้ทั้ง 2 แท็บ
     with st.spinner("กำลังเจาะลึกข้อมูลฮาร์ดแวร์และตรวจสอบ Log..."):
         hw_data = parse_tsr(uf)
         lc_logs = parse_lc_log(uf)
 
-    # สร้างแท็บ
     tab1, tab2 = st.tabs(["📊 1. Hardware Summary (สเปกเครื่อง)", "🛡️ 2. Data Erase Audit (ตรวจสอบการลบข้อมูล)"])
     
-    # ------------------- TAB 1: Hardware Summary -------------------
+    # ------------------- TAB 1 -------------------
     with tab1:
         if hw_data:
             st.success("✅ โหลดข้อมูลฮาร์ดแวร์สำเร็จ!")
@@ -253,31 +255,35 @@ if uf:
                     hn = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
                     stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
                     fn = f"{hn}_{stg}.docx".replace(" ", "_").replace("/", "-")
-                    
                     st.download_button("📥 ดาวน์โหลด Word (Hardware)", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                 except Exception as e: st.error(f"Error: {e}")
 
-    # ------------------- TAB 2: Data Erase Audit -------------------
+    # ------------------- TAB 2 -------------------
     with tab2:
         st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)")
         
-        if lc_logs is None:
-            st.warning("⚠️ ไม่พบไฟล์ LifecycleLog.xml ใน ZIP นี้ (ระบบอาจไม่ได้เปิดการบันทึก Log ไว้)")
-        elif len(lc_logs) == 0:
-            st.warning("⚠️ พบไฟล์ LifecycleLog แต่ไม่สามารถอ่านโครงสร้างข้อมูลได้")
-        else:
-            # รหัสที่ต้องการค้นหาตามเอกสาร Word ของ SOC
-            target_ids = ['SYS1000', 'SYS162', 'SYS144', 'SYS146', 'SYS153', 'SYS201', 'SYS150', 'SYS151', 'SYS1001']
+        if lc_logs.get("status") == "not_found":
+            st.warning("⚠️ ไม่พบไฟล์ Lclog.xml หรือ LifecycleLog.xml ใน ZIP นี้")
+            with st.expander("🔍 คลิกดูรายชื่อไฟล์ Log ที่มีในเครื่องนี้ (เพื่อช่วยตรวจสอบชื่อไฟล์)"):
+                st.write(lc_logs.get("debug", []))
+                
+        elif lc_logs.get("status") == "error":
+            st.error(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ Log: {lc_logs.get('message')}")
             
-            # คัดกรองเฉพาะ Log ที่เราสนใจ
-            found_logs = [log for log in lc_logs if log["Code"] in target_ids]
+        elif lc_logs.get("status") == "success":
+            logs_data = lc_logs.get("data", [])
+            st.caption(f"📂 อ่านข้อมูลสำเร็จจากไฟล์: `{lc_logs.get('file_used', '')}`")
+            
+            # ค้นหารหัสตามมาตรฐาน SOC
+            target_ids = ['SYS1000', 'SYS162', 'SYS144', 'SYS146', 'SYS153', 'SYS201', 'SYS150', 'SYS151', 'SYS1001']
+            found_logs = [log for log in logs_data if log["Code"] in target_ids]
             
             if len(found_logs) > 0:
                 st.success(f"✅ พบหลักฐานการทำ Data Erase ทั้งหมด {len(found_logs)} รายการ")
-                
-                # แสดงผลเป็นตารางเพื่อให้ดูง่าย
                 st.dataframe(found_logs, hide_index=True, use_container_width=True)
             else:
-                st.error("❌ ไม่พบหลักฐานรหัส SYS ที่เกี่ยวข้องกับการลบข้อมูล (Data Erase) ใน Log เครื่องนี้เลยครับ")
+                st.error("❌ อ่านไฟล์ Log ได้สำเร็จ แต่ไม่พบรหัส SYS ที่เกี่ยวกับการลบข้อมูล (Data Erase) ในเครื่องนี้เลยครับ")
+                with st.expander("🔍 คลิกดู Log ทั้งหมดในเครื่อง (100 รายการล่าสุด)"):
+                    st.dataframe(logs_data[:100], hide_index=True, use_container_width=True)
 
 # --- จบโค้ดตรงนี้ชัวร์ 100% ---
