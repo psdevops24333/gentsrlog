@@ -1,9 +1,9 @@
 import streamlit as st
 import zipfile
 import xml.etree.ElementTree as ET
+import json
 import io
 
-# --- ฟังก์ชันหลักในการแกะข้อมูลจริงจาก TSR Log (.zip) ---
 def parse_tsr_log(uploaded_file):
     hardware_data = {
         "Model": "-",
@@ -23,33 +23,93 @@ def parse_tsr_log(uploaded_file):
     
     try:
         with zipfile.ZipFile(uploaded_file, 'r') as z:
-            # ค้นหาไฟล์ inventory.xml ภายใน TSR Zip
-            inventory_file = None
-            for fname in z.namelist():
-                if 'inventory.xml' in fname.lower() or 'hw_inventory.xml' in fname.lower():
-                    inventory_file = fname
-                    break
+            all_files = z.namelist()
             
-            if inventory_file:
-                xml_content = z.read(inventory_file)
+            # --- DEBUG: แสดงรายชื่อไฟล์ 15 ไฟล์แรกใน ZIP เพื่อตรวจสอบโครงสร้าง ---
+            with st.expander("🔍 ดูโครงสร้างไฟล์ภายใน TSR ZIP (สำหรับตรวจสอบ)"):
+                st.write(f"จำนวนไฟล์ทั้งหมดใน ZIP: {len(all_files)} ไฟล์")
+                st.write("ตัวอย่างรายชื่อไฟล์ภายใน:")
+                st.code("\n".join(all_files[:15]))
+            
+            # ค้นหาไฟล์เป้าหมาย (รองรับทั้ง XML และ JSON)
+            inventory_xml_file = None
+            inventory_json_file = None
+            
+            for fname in all_files:
+                fname_lower = fname.lower()
+                if 'inventory.xml' in fname_lower or 'hw_inventory.xml' in fname_lower:
+                    inventory_xml_file = fname
+                elif 'hardware_inventory.json' in fname_lower or 'hw_inventory.json' in fname_lower:
+                    inventory_json_file = fname
+
+            # -------------------------------------------------------------
+            # ทางเลือกที่ 1: แกะไฟล์ JSON (สำหรับ iDRAC รุ่นใหม่/เฟิร์มแวร์ใหม่)
+            # -------------------------------------------------------------
+            if inventory_json_file:
+                st.info(f"📂 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}` กำลังประมวลผล...")
+                json_data = json.loads(z.read(inventory_json_file).decode('utf-8', errors='ignore'))
+                
+                # พยายามดักจับข้อมูลแบบ Generic จาก JSON Object
+                # ดึงจากโครงสร้างหลักของ Dell JSON
+                system_inventory = json_data.get("SystemInventory", json_data)
+                components = system_inventory.get("Component", [])
+                if isinstance(components, dict):  # บางครั้งเป็น Object ตัวเดียว
+                    components = [components]
+                
+                for comp in components:
+                    fqdd = comp.get("@FQDD", comp.get("FQDD", ""))
+                    attributes = comp.get("Attribute", [])
+                    if isinstance(attributes, dict):
+                        attributes = [attributes]
+                        
+                    attr_dict = {}
+                    for attr in attributes:
+                        name = attr.get("@Name", attr.get("Name"))
+                        value = attr.get("#text", attr.get("Value", attr.get("text")))
+                        if name and value:
+                            attr_dict[name] = value
+
+                    # ทำการ Map ข้อมูล
+                    if "System.Board" in fqdd:
+                        if "Model" in attr_dict: hardware_data["Model"] = attr_dict["Model"]
+                        if "ServiceTag" in attr_dict: hardware_data["Serial Number (Service Tag)"] = attr_dict["ServiceTag"]
+                    elif "iDRAC.Embedded" in fqdd and "HostName" in attr_dict:
+                        hardware_data["Hostname"] = attr_dict["HostName"]
+                    elif "IPv4." in fqdd and "Address" in attr_dict and attr_dict["Address"] != "0.0.0.0":
+                        hardware_data["IP iDRAC"] = attr_dict["Address"]
+                    elif "CPU.Socket" in fqdd and "Model" in attr_dict:
+                        cpu_list.append(attr_dict["Model"])
+                    elif "DIMM.Socket" in fqdd and attr_dict.get("Size") not in ["0 MB", "0", "-", None]:
+                        ram_list.append(f"{attr_dict.get('Size')} ({attr_dict.get('Speed', '')})")
+                    elif ("Disk." in fqdd or "PhysicalDisk." in fqdd) and "Size" in attr_dict:
+                        disk_list.append(f"{attr_dict['Size']} {attr_dict.get('MediaType', '')}")
+                    elif ("RAID." in fqdd or "AHCI." in fqdd) and "ProductName" in attr_dict:
+                        controller_list.append(attr_dict["ProductName"])
+                    elif "NIC." in fqdd and "ProductName" in attr_dict:
+                        nic_list.append(attr_dict["ProductName"])
+                    elif ("FC." in fqdd or "FibreChannel." in fqdd) and "ProductName" in attr_dict:
+                        fc_list.append(attr_dict["ProductName"])
+
+            # -------------------------------------------------------------
+            # ทางเลือกที่ 2: แกะไฟล์ XML (สำหรับ iDRAC ทั่วไป)
+            # -------------------------------------------------------------
+            elif inventory_xml_file:
+                st.info(f"📂 ตรวจพบไฟล์ข้อมูลแบบ XML: `{inventory_xml_file}` กำลังประมวลผล...")
+                xml_content = z.read(inventory_xml_file)
                 root = ET.fromstring(xml_content)
                 
-                # ลบ XML Namespaces ออกทั้งหมดเพื่อให้ค้นหาข้อมูลได้แม่นยำ
+                # ลบ XML Namespaces
                 for elem in root.iter():
                     if '}' in elem.tag:
                         elem.tag = elem.tag.split('}', 1)[1]
                 
-                # วนลูปสกัดข้อมูลตาม FQDD ของ Dell iDRAC
                 for comp in root.findall('.//Component'):
                     fqdd = comp.get('FQDD', '')
                     
-                    # 1. Model & Serial Number
                     if 'System.Board' in fqdd:
                         for attr in comp.findall('Attribute'):
                             if attr.get('Name') == 'Model': hardware_data['Model'] = attr.text
                             if attr.get('Name') == 'ServiceTag': hardware_data['Serial Number (Service Tag)'] = attr.text
-                            
-                    # 2. Hostname & IP iDRAC
                     elif 'iDRAC.Embedded' in fqdd:
                         for attr in comp.findall('Attribute'):
                             if attr.get('Name') == 'HostName': hardware_data['Hostname'] = attr.text
@@ -57,46 +117,31 @@ def parse_tsr_log(uploaded_file):
                         for attr in comp.findall('Attribute'):
                             if attr.get('Name') == 'Address' and attr.text != '0.0.0.0': 
                                 hardware_data['IP iDRAC'] = attr.text
-
-                    # 3. CPU
                     elif 'CPU.Socket' in fqdd:
                         model = comp.find("Attribute[@Name='Model']")
                         if model is not None: cpu_list.append(model.text)
-                        
-                    # 4. RAM
                     elif 'DIMM.Socket' in fqdd:
                         size = comp.find("Attribute[@Name='Size']")
                         speed = comp.find("Attribute[@Name='Speed']")
                         if size is not None and size.text not in ['0 MB', '0', '-', 'None']:
-                            ram_info = size.text
-                            if speed is not None: ram_info += f" ({speed.text})"
-                            ram_list.append(ram_info)
-                            
-                    # 5. Physical Disk
+                            ram_list.append(f"{size.text} ({speed.text if speed is not None else ''})")
                     elif 'Disk.' in fqdd or 'PhysicalDisk.' in fqdd:
                         size = comp.find("Attribute[@Name='Size']")
                         media = comp.find("Attribute[@Name='MediaType']")
                         if size is not None:
-                            desc = size.text
-                            if media is not None: desc += f" {media.text}"
-                            disk_list.append(desc)
-                            
-                    # 6. Controller Card
+                            disk_list.append(f"{size.text} {media.text if media is not None else ''}")
                     elif 'RAID.' in fqdd or 'AHCI.' in fqdd:
                         prod = comp.find("Attribute[@Name='ProductName']")
                         if prod is not None: controller_list.append(prod.text)
-                        
-                    # 7. Interface LAN
                     elif 'NIC.' in fqdd:
                         prod = comp.find("Attribute[@Name='ProductName']")
-                        if prod is not None and prod.text not in nic_list:
-                            nic_list.append(prod.text)
-                            
-                    # 8. FC Channel
+                        if prod is not None: nic_list.append(prod.text)
                     elif 'FC.' in fqdd or 'FibreChannel.' in fqdd:
                         prod = comp.find("Attribute[@Name='ProductName']")
-                        if prod is not None and prod.text not in fc_list:
-                            fc_list.append(prod.text)
+                        if prod is not None: fc_list.append(prod.text)
+            
+            else:
+                st.warning("⚠️ ไม่พบไฟล์ `inventory.xml` หรือ `hardware_inventory.json` ในระบบกรุณาตรวจสอบไฟล์ ZIP")
 
         # สรุปผลข้อมูลจัดกลุ่ม (Grouping)
         if cpu_list: hardware_data['CPU'] = f"{len(cpu_list)}x {cpu_list[0]}"
@@ -107,11 +152,10 @@ def parse_tsr_log(uploaded_file):
         if fc_list: hardware_data['FC Channel'] = ", ".join(list(set(fc_list)))
         
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านโครงสร้างไฟล์ XML: {e}")
+        st.error(f"เกิดข้อผิดพลาดในการประมวลผลไฟล์: {e}")
         
     return hardware_data
 
-# --- ฟังก์ชันสร้างไฟล์ .docx (ย้ายการโหลด Library มาไว้ข้างในเพื่อความปลอดภัย) ---
 def export_to_docx(data):
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -120,7 +164,6 @@ def export_to_docx(data):
     from docx.oxml.ns import qn
     
     doc = Document()
-    
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_run = title_p.add_run("Lifecycle Log Summary Inventory")
@@ -130,7 +173,6 @@ def export_to_docx(data):
     
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
-    
     hdr_cells = table.rows[0].cells
     hdr_cells[0].text = 'Hardware Component'
     hdr_cells[1].text = 'Details / Value'
@@ -138,8 +180,6 @@ def export_to_docx(data):
     for cell in hdr_cells:
         cell.paragraphs[0].runs[0].font.bold = True
         cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-        
-        # ใส่สีพื้นหลังหัวตาราง สีกรมท่า
         tcPr = cell._tc.get_or_add_tcPr()
         shd = OxmlElement('w:shd')
         shd.set(qn('w:val'), 'clear')
@@ -158,37 +198,30 @@ def export_to_docx(data):
     docx_buffer.seek(0)
     return docx_buffer
 
-# --- การตั้งค่าหน้าจอและ UI ของ Streamlit ---
 st.set_page_config(page_title="TSR Log Hardware Extractor", page_icon="🖥️", layout="wide")
-
 st.title("🖥️ TSR Log Hardware Extractor")
 st.subheader("อัปโหลดไฟล์ Dell TSR Log (.zip) เพื่อดึงข้อมูล Inventory เสมือนในหน้า Lifecycle")
 
 uploaded_file = st.file_uploader("เลือกไฟล์ TSR Log (.zip)", type=["zip"])
 
 if uploaded_file is not None:
-    st.success("โหลดไฟล์สำเร็จ! กำลังทำการวิเคราะห์ XML และดึงข้อมูลจริง...")
+    st.success("โหลดไฟล์สำเร็จ! กำลังวิเคราะห์และดึงข้อมูล...")
     
-    # เรียกฟังก์ชันแกะข้อมูลจริง
     parsed_data = parse_tsr_log(uploaded_file)
     
     st.write("### 📊 Lifecycle Log Summary Inventory")
-    
-    # แปลงผลลัพธ์ดั้งเดิมเป็นโครงสร้างตารางแสดงผลบนเว็บ (โดยไม่ใช้ pandas)
     table_rows = [{"Hardware Component": k, "Details / Value": v} for k, v in parsed_data.items()]
     st.table(table_rows)
     
     st.write("---")
-    
-    # สร้างปุ่มสำหรับกด Export ป้องกันเว็บแครชตอนโหลดหน้าแรก
     if st.button("🔄 คลิกที่นี่เพื่อเตรียมไฟล์ Word (.docx)"):
         try:
             docx_file = export_to_docx(parsed_data)
             st.download_button(
-                label="📥 ดาวน์โหลดไฟล์ Word (.docx) สำเร็จ",
+                label="📥 ดาวน์โหลดไฟล์ Word (.docx)",
                 data=docx_file,
                 file_name=f"Inventory_{parsed_data['Serial Number (Service Tag)']}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
         except Exception as e:
-            st.error(f"ไม่สามารถสร้างไฟล์ Word ได้เนื่องจากคลังโปรแกรมฝั่งเซิร์ฟเวอร์มีปัญหา: {e}")
+            st.error(f"ไม่สามารถสร้างไฟล์ Word ได้: {e}")
