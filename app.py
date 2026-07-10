@@ -1,7 +1,9 @@
 import streamlit as st, zipfile, json, io
 import xml.etree.ElementTree as ET
 
-# ฟังก์ชันแปลงหน่วย RAM
+# ==========================================
+# ⚙️ 1. ฟังก์ชันช่วยเหลือ (Helper Functions)
+# ==========================================
 def f_ram(s):
     s = str(s).upper().replace('MB','').replace('BYTES','').replace(' ','')
     try:
@@ -9,7 +11,6 @@ def f_ram(s):
         return f"{v/(1024**3):.0f} GB" if v > 1048576 else f"{v/1024:.0f} GB"
     except: return str(s)
 
-# ฟังก์ชันแปลงหน่วย Disk
 def f_dsk(s):
     s = str(s).upper().replace('BYTES','').replace('B','').replace(' ','')
     try:
@@ -20,7 +21,6 @@ def f_dsk(s):
     except: pass
     return str(s)
 
-# ฟังก์ชันแปลงเลข Link Status เป็นคำว่า Up/Down
 def link_st(v):
     v = str(v).strip()
     if v == '1': return 'Up'
@@ -29,6 +29,45 @@ def link_st(v):
     if v == '5': return 'Dormant'
     return v if v else '-'
 
+# ==========================================
+# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (สำหรับตรวจสอบ SYS Code)
+# ==========================================
+def parse_lc_log(up_file):
+    logs = []
+    try:
+        with zipfile.ZipFile(up_file, 'r') as oz:
+            fs = oz.namelist()
+            izn = next((f for f in fs if f.lower().endswith('.zip')), None)
+            tz = zipfile.ZipFile(io.BytesIO(oz.read(izn)), 'r') if izn else oz
+            tfs = tz.namelist()
+            
+            # ควานหาไฟล์ Lifecycle Log ภายใน ZIP
+            lcf = next((f for f in tfs if 'lifecycle' in f.lower() and f.lower().endswith('.xml')), None)
+            if not lcf: return None
+            
+            rt = ET.fromstring(tz.read(lcf))
+            for el in rt.iter():
+                if '}' in el.tag: el.tag = el.tag.split('}', 1)[1]
+            
+            # ดึง Event ID และเวลาทั้งหมด
+            for node in rt.iter():
+                m_id = node.find('MessageId')
+                if m_id is None: m_id = node.find('MessageID')
+                if m_id is not None and m_id.text:
+                    ts = node.find('Timestamp')
+                    if ts is None: ts = node.find('CreationTimeStamp')
+                    ms = node.find('Message')
+                    logs.append({
+                        "Code": m_id.text.strip().upper(),
+                        "Time": ts.text.strip() if ts is not None else "-",
+                        "Details": ms.text.strip() if ms is not None else "-"
+                    })
+        return logs
+    except Exception: return []
+
+# ==========================================
+# ⚙️ 3. ฟังก์ชันแกะข้อมูลฮาร์ดแวร์ (ตัวสมบูรณ์)
+# ==========================================
 def parse_tsr(up_file):
     ex = {}
     try:
@@ -155,7 +194,7 @@ def exp_docx(pd):
     dc = Document()
     tp = dc.add_paragraph()
     tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    tr = tp.add_run("Hardware Summary")
+    tr = tp.add_run("TSR Log Hardware Summary")
     tr.font.size = Pt(18); tr.font.bold = True; tr.font.color.rgb = RGBColor(26, 82, 118)
     for sn, rcs in pd.items():
         if not rcs: continue
@@ -179,33 +218,66 @@ def exp_docx(pd):
     bf = io.BytesIO(); dc.save(bf); bf.seek(0)
     return bf
 
-st.set_page_config(page_title="TSR Log Hardware Extractor", page_icon="🖥️", layout="wide")
-st.title("🖥️ TSR Log Hardware Extractor")
-st.subheader("ระบบแสดงผลสเปกเครื่องเชิงลึก (เทียบเท่า Dell HTML Report)")
+# ==========================================
+# 🖥️ 4. ส่วนหน้าเว็บ (Streamlit UI)
+# ==========================================
+st.set_page_config(page_title="TSR Log Tool", page_icon="🖥️", layout="wide")
+st.title("🖥️ Server Inventory & Data Erase Audit Tool")
 
-uf = st.file_uploader("เลือกไฟล์ TSR Log (.zip)", type=["zip"])
+# อัปโหลดไฟล์ครั้งเดียว ใช้ได้ทั้ง 2 ระบบ
+uf = st.file_uploader("อัปโหลดไฟล์ TSR Log (.zip) ของคุณที่นี่", type=["zip"])
+
 if uf:
-    with st.spinner("กำลังเจาะลึกข้อมูล Attributes ทั้งหมด..."):
-        pd = parse_tsr(uf)
-    if pd:
-        for s, r in pd.items():
-            if r:
-                st.markdown(f"#### 🔹 {s}")
-                st.dataframe(r, hide_index=True, use_container_width=True)
-        st.write("---")
-        if st.button("🔄 ส่งออกรายงานเป็น Word"):
-            try:
-                df = exp_docx(pd)
+    # ใช้วิธี Cache แบบชั่วคราว ดึงข้อมูลเตรียมไว้ให้ทั้ง 2 แท็บ
+    with st.spinner("กำลังเจาะลึกข้อมูลฮาร์ดแวร์และตรวจสอบ Log..."):
+        hw_data = parse_tsr(uf)
+        lc_logs = parse_lc_log(uf)
+
+    # สร้างแท็บ
+    tab1, tab2 = st.tabs(["📊 1. Hardware Summary (สเปกเครื่อง)", "🛡️ 2. Data Erase Audit (ตรวจสอบการลบข้อมูล)"])
+    
+    # ------------------- TAB 1: Hardware Summary -------------------
+    with tab1:
+        if hw_data:
+            st.success("✅ โหลดข้อมูลฮาร์ดแวร์สำเร็จ!")
+            for s, r in hw_data.items():
+                if r:
+                    st.markdown(f"#### 🔹 {s}")
+                    st.dataframe(r, hide_index=True, use_container_width=True)
+            
+            st.write("---")
+            if st.button("🔄 ส่งออกรายงานฮาร์ดแวร์เป็น Word"):
+                try:
+                    df = exp_docx(hw_data)
+                    sys_info = hw_data.get("System Information", [])
+                    hn = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
+                    stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
+                    fn = f"{hn}_{stg}.docx".replace(" ", "_").replace("/", "-")
+                    
+                    st.download_button("📥 ดาวน์โหลด Word (Hardware)", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                except Exception as e: st.error(f"Error: {e}")
+
+    # ------------------- TAB 2: Data Erase Audit -------------------
+    with tab2:
+        st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)")
+        
+        if lc_logs is None:
+            st.warning("⚠️ ไม่พบไฟล์ LifecycleLog.xml ใน ZIP นี้ (ระบบอาจไม่ได้เปิดการบันทึก Log ไว้)")
+        elif len(lc_logs) == 0:
+            st.warning("⚠️ พบไฟล์ LifecycleLog แต่ไม่สามารถอ่านโครงสร้างข้อมูลได้")
+        else:
+            # รหัสที่ต้องการค้นหาตามเอกสาร Word ของ SOC
+            target_ids = ['SYS1000', 'SYS162', 'SYS144', 'SYS146', 'SYS153', 'SYS201', 'SYS150', 'SYS151', 'SYS1001']
+            
+            # คัดกรองเฉพาะ Log ที่เราสนใจ
+            found_logs = [log for log in lc_logs if log["Code"] in target_ids]
+            
+            if len(found_logs) > 0:
+                st.success(f"✅ พบหลักฐานการทำ Data Erase ทั้งหมด {len(found_logs)} รายการ")
                 
-                # --- ส่วนดึงค่าสำหรับตั้งชื่อไฟล์แบบไดนามิก ---
-                sys_info = pd.get("System Information", [])
-                hostname = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
-                service_tag = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
-                
-                # ทำความสะอาดชื่อไฟล์ ป้องกันบั๊กกรณีค่าเป็นขีดหรือมีช่องว่าง
-                filename = f"{hostname}_{service_tag}.docx".replace(" ", "_").replace("/", "-")
-                
-                st.download_button("📥 ดาวน์โหลด Word", data=df, file_name=filename, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            except Exception as e: st.error(f"Error: {e}")
+                # แสดงผลเป็นตารางเพื่อให้ดูง่าย
+                st.dataframe(found_logs, hide_index=True, use_container_width=True)
+            else:
+                st.error("❌ ไม่พบหลักฐานรหัส SYS ที่เกี่ยวข้องกับการลบข้อมูล (Data Erase) ใน Log เครื่องนี้เลยครับ")
 
 # --- จบโค้ดตรงนี้ชัวร์ 100% ---
