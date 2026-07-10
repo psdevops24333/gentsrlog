@@ -1,7 +1,7 @@
 import streamlit as st
 import zipfile
 import xml.etree.ElementTree as ET
-import json
+import pandas as pd
 import io
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -9,7 +9,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-# --- ฟังก์ชันการช่วยตั้งค่าพื้นหลังตารางใน Word (Shading) ---
 def set_cell_background(cell, fill_hex):
     tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement('w:shd')
@@ -18,136 +17,170 @@ def set_cell_background(cell, fill_hex):
     shd.set(qn('w:fill'), fill_hex)
     tcPr.append(shd)
 
-# --- ฟังก์ชันหลักในการแกะข้อมูลจาก TSR Log (.zip) ---
 def parse_tsr_log(uploaded_file):
-    # กำหนดค่าเริ่มต้น (Default/Fallback Values) เผื่อกรณีหา Tag ไม่เจอ
+    # กำหนดค่าเริ่มต้น
     hardware_data = {
-        "Model": "ไม่พบข้อมูล",
-        "Serial Number (Service Tag)": "ไม่พบข้อมูล",
-        "Hostname": "ไม่พบข้อมูล",
-        "IP iDRAC": "ไม่พบข้อมูล",
-        "CPU": "ไม่พบข้อมูล",
-        "RAM": "ไม่พบข้อมูล",
-        "Physical Disk": "ไม่พบข้อมูล",
-        "Controller Card": "ไม่พบข้อมูล",
-        "Interface LAN": "ไม่พบข้อมูล",
-        "FC Channel": "ไม่พบข้อมูล"
+        "Model": "-",
+        "Serial Number (Service Tag)": "-",
+        "Hostname": "-",
+        "IP iDRAC": "-",
+        "CPU": "-",
+        "RAM": "-",
+        "Physical Disk": "-",
+        "Controller Card": "-",
+        "Interface LAN": "-",
+        "FC Channel": "-"
     }
+    
+    cpu_list, ram_list, disk_list = [], [], []
+    nic_list, fc_list, controller_list = [], [], []
     
     try:
         with zipfile.ZipFile(uploaded_file, 'r') as z:
-            file_list = z.namelist()
+            # ค้นหาไฟล์ inventory.xml ภายใน TSR Zip
+            inventory_file = None
+            for fname in z.namelist():
+                if 'inventory.xml' in fname.lower():
+                    inventory_file = fname
+                    break
             
-            # ตัวอย่างการค้นหาและอ่านไฟล์ภายใน TSR Zip
-            # ใน TSR ของ Dell ข้อมูลมักจะอยู่ใน 'sysconfig.xml', 'inventory.xml' หรือไฟล์ JSON ในโฟลเดอร์ tsr/
-            for file_name in file_list:
-                # 1. ตัวอย่างการอ่านไฟล์ XML เพื่อดึงค่าพื้นฐาน
-                if 'sysconfig.xml' in file_name.lower() or 'inventory.xml' in file_name.lower():
-                    xml_content = z.read(file_name)
-                    root = ET.fromstring(xml_content)
-                    
-                    # ตัวอย่าง Logic การดึงค่า (ปรับเปลี่ยนตามโครงสร้าง XML จริงของรุ่นนั้นๆ)
-                    # For example only:
-                    # if root.find(".//Model") is not None:
-                    #     hardware_data["Model"] = root.find(".//Model").text
-                    pass
+            if inventory_file:
+                xml_content = z.read(inventory_file)
+                root = ET.fromstring(xml_content)
                 
-                # 2. ตัวอย่างการอ่านไฟล์ JSON (iDRAC รุ่นใหม่ๆ)
-                elif 'hardware_inventory.json' in file_name.lower():
-                    json_content = json.loads(z.read(file_name).decode('utf-8'))
-                    # ดึงค่าตาม Key ของ JSON
-                    pass
+                # วนลูปหาข้อมูลตาม Component FQDD ของ Dell
+                for comp in root.findall('.//Component'):
+                    fqdd = comp.get('FQDD', '')
+                    
+                    # 1. Model & Serial Number
+                    if 'System.Board' in fqdd:
+                        for attr in comp.findall('Attribute'):
+                            if attr.get('Name') == 'Model': hardware_data['Model'] = attr.text
+                            if attr.get('Name') == 'ServiceTag': hardware_data['Serial Number (Service Tag)'] = attr.text
+                            
+                    # 2. Hostname & IP iDRAC
+                    elif 'iDRAC.Embedded' in fqdd:
+                        for attr in comp.findall('Attribute'):
+                            if attr.get('Name') == 'HostName': hardware_data['Hostname'] = attr.text
+                    elif 'IPv4.' in fqdd:
+                        for attr in comp.findall('Attribute'):
+                            if attr.get('Name') == 'Address' and attr.text != '0.0.0.0': 
+                                hardware_data['IP iDRAC'] = attr.text
 
-            # --- ส่วนจำลองข้อมูลที่ดึงได้จาก TSR Log เพื่อแสดงผลบนหน้าเว็บ ---
-            # (เมื่อนำไปใช้จริง สามารถเขียน Logic นำค่าที่ Parse ได้ด้านบนมาเขียนทับที่นี่)
-            hardware_data["Model"] = "PowerEdge R750"
-            hardware_data["Serial Number (Service Tag)"] = "9XPLK83"
-            hardware_data["Hostname"] = "bkk-prod-db01"
-            hardware_data["IP iDRAC"] = "192.168.10.45"
-            hardware_data["CPU"] = "2x Intel(R) Xeon(R) Gold 6330 CPU @ 2.00GHz (56 Cores Total)"
-            hardware_data["RAM"] = "512 GB (16x 32GB DDR4 3200MHz RDIMM)"
-            hardware_data["Physical Disk"] = "4x 1.92TB NVMe SSD Read Intensive, 8x 2.4TB 10K RPM SAS HDD"
-            hardware_data["Controller Card"] = "PERC H755 Front NVMe"
-            hardware_data["Interface LAN"] = "2x 10GbE SFP+ LOM (Intel X710) + 4x 1GbE RJ45 Base-T"
-            hardware_data["FC Channel"] = "2x QLogic 2772 Dual Port 32Gb Fibre Channel HBA"
-            
+                    # 3. CPU
+                    elif 'CPU.Socket' in fqdd:
+                        model = comp.find("Attribute[@Name='Model']")
+                        if model is not None: cpu_list.append(model.text)
+                        
+                    # 4. RAM
+                    elif 'DIMM.Socket' in fqdd:
+                        size = comp.find("Attribute[@Name='Size']")
+                        speed = comp.find("Attribute[@Name='Speed']")
+                        if size is not None and size.text not in ['0 MB', '0']:
+                            ram_info = size.text
+                            if speed is not None: ram_info += f" ({speed.text})"
+                            ram_list.append(ram_info)
+                            
+                    # 5. Physical Disk
+                    elif 'Disk.' in fqdd or 'PhysicalDisk.' in fqdd:
+                        size = comp.find("Attribute[@Name='Size']")
+                        media = comp.find("Attribute[@Name='MediaType']")
+                        if size is not None:
+                            desc = size.text
+                            if media is not None: desc += f" {media.text}"
+                            disk_list.append(desc)
+                            
+                    # 6. Controller Card
+                    elif 'RAID.' in fqdd or 'AHCI.' in fqdd:
+                        prod = comp.find("Attribute[@Name='ProductName']")
+                        if prod is not None: controller_list.append(prod.text)
+                        
+                    # 7. Interface LAN
+                    elif 'NIC.' in fqdd:
+                        prod = comp.find("Attribute[@Name='ProductName']")
+                        if prod is not None and prod.text not in nic_list:
+                            nic_list.append(prod.text)
+                            
+                    # 8. FC Channel
+                    elif 'FC.' in fqdd or 'FibreChannel.' in fqdd:
+                        prod = comp.find("Attribute[@Name='ProductName']")
+                        if prod is not None and prod.text not in fc_list:
+                            fc_list.append(prod.text)
+
+        # สรุปผลข้อมูลจากการดึง (Grouping)
+        if cpu_list: hardware_data['CPU'] = f"{len(cpu_list)}x {cpu_list[0]}"
+        if ram_list: hardware_data['RAM'] = f"{len(ram_list)} DIMMs (e.g., {ram_list[0]})"
+        if disk_list: hardware_data['Physical Disk'] = f"รวม {len(disk_list)} ลูก (e.g., {disk_list[0]})"
+        if controller_list: hardware_data['Controller Card'] = ", ".join(list(set(controller_list)))
+        if nic_list: hardware_data['Interface LAN'] = ", ".join(list(set(nic_list)))
+        if fc_list: hardware_data['FC Channel'] = ", ".join(list(set(fc_list)))
+        
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ TSR Log: {e}")
+        st.error(f"เกิดข้อผิดพลาดในการอ่านโครงสร้าง XML: {e}")
         
     return hardware_data
 
-# --- ฟังก์ชันสร้างไฟล์ .docx ---
 def export_to_docx(data):
     doc = Document()
     
-    # กำหนดรูปแบบหัวข้อใหญ่
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run("Server Hardware Inventory Report")
-    title_run.font.size = Pt(20)
+    title_run = title_p.add_run("Lifecycle Log Summary Inventory")
+    title_run.font.size = Pt(18)
     title_run.font.bold = True
-    title_run.font.color.rgb = RGBColor(26, 82, 118) # สีกรมท่า/น้ำเงินเข้ม
+    title_run.font.color.rgb = RGBColor(26, 82, 118)
     
-    doc.add_paragraph("รายงานข้อมูลฮาร์ดแวร์ที่สกัดจากระบบ Technical Support Report (TSR Log)")
-    
-    # สร้างตารางข้อมูล 2 คอลัมน์
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
     
-    # หัวตาราง (Header)
     hdr_cells = table.rows[0].cells
     hdr_cells[0].text = 'Hardware Component'
     hdr_cells[1].text = 'Details / Value'
     
-    # ตกแต่ง Header
     for cell in hdr_cells:
         cell.paragraphs[0].runs[0].font.bold = True
         cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-        set_cell_background(cell, "1A5276") # พื้นหลังหัวตารางสีกรมท่า
+        set_cell_background(cell, "1A5276")
         
-    # ใส่ข้อมูลลงในตาราง
     for key, value in data.items():
         row_cells = table.add_row().cells
         row_cells[0].text = str(key)
         row_cells[1].text = str(value)
-        
-        # ทำตัวหนาที่คอลัมน์แรกเพื่อความสวยงาม
         row_cells[0].paragraphs[0].runs[0].font.bold = True
         
-    # บันทึกไฟล์ลงใน Memory (BytesIO) เพื่อให้ส่งดาวน์โหลดผ่านเว็บได้ทันที
     docx_buffer = io.BytesIO()
     doc.save(docx_buffer)
     docx_buffer.seek(0)
     return docx_buffer
 
-# --- ส่วนการแสดงผลบนหน้าเว็บ (Streamlit UI) ---
-st.set_page_config(page_title="TSR Log Hardware Inventory Extractor", page_icon="🖥️", layout="wide")
+# --- UI Setup ---
+st.set_page_config(page_title="TSR Log Hardware Extractor", page_icon="🖥️", layout="wide")
 
-st.title("🖥️ TSR Log Hardware Inventory Extractor")
-st.subheader("อัปโหลดไฟล์ Dell TSR Log (.zip) เพื่อดึงข้อมูลฮาร์ดแวร์สำคัญ")
+st.title("🖥️ TSR Log Hardware Extractor")
+st.subheader("อัปโหลดไฟล์ Dell TSR Log (.zip) เพื่อดึงข้อมูล Inventory เสมือนในหน้า Lifecycle")
 
 uploaded_file = st.file_uploader("เลือกไฟล์ TSR Log (.zip)", type=["zip"])
 
 if uploaded_file is not None:
-    st.success("โหลดไฟล์สำเร็จ! กำลังทำการวิเคราะห์และดึงข้อมูล...")
+    st.success("โหลดไฟล์สำเร็จ! กำลังทำการวิเคราะห์ XML และดึงข้อมูลจริง...")
     
-    # เรียกฟังก์ชันอ่านไฟล์
+    # แกะข้อมูลจริง
     parsed_data = parse_tsr_log(uploaded_file)
     
-    st.write("### 📊 ข้อมูลฮาร์ดแวร์ที่พบ (Hardware Inventory)")
+    st.write("### 📊 Lifecycle Log Summary Inventory")
     
-    # แสดงผลในรูปแบบ Key-Value Key ในตารางเว็บแอป
-    for key, val in parsed_data.items():
-        st.markdown(f"**• {key}:** {val}")
-        
-    # สร้างไฟล์ Word
+    # แปลง Dictionary เป็น Pandas DataFrame เพื่อแสดงเป็นตารางสวยๆ
+    df = pd.DataFrame(list(parsed_data.items()), columns=['Hardware Component', 'Details / Value'])
+    
+    # แสดงตารางบน Streamlit
+    st.table(df)
+    
+    # ส่วน Export
     docx_file = export_to_docx(parsed_data)
-    
     st.write("---")
-    # ปุ่มดาวน์โหลดไฟล์ .docx
     st.download_button(
-        label="📥 Export เป็นไฟล์ Word (.docx)",
+        label="📥 Export ตารางนี้เป็นไฟล์ Word (.docx)",
         data=docx_file,
-        file_name=f"Hardware_Inventory_{parsed_data['Serial Number (Service Tag)']}.docx",
+        file_name=f"Inventory_{parsed_data['Serial Number (Service Tag)']}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
