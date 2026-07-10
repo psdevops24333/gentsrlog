@@ -30,7 +30,7 @@ def link_st(v):
     return v if v else '-'
 
 # ==========================================
-# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (อัปเดตใหม่)
+# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (อัปเดตเรื่องเวลา)
 # ==========================================
 def parse_lc_log(up_file):
     try:
@@ -40,35 +40,32 @@ def parse_lc_log(up_file):
             tz = zipfile.ZipFile(io.BytesIO(oz.read(izn)), 'r') if izn else oz
             tfs = tz.namelist()
             
-            # แก้ไข: ค้นหาทั้งคำว่า lclog และ lifecycle
             lcf = next((f for f in tfs if ('lclog' in f.lower() or 'lifecycle' in f.lower()) and f.lower().endswith('.xml')), None)
-            
-            if not lcf: 
-                # เก็บรายชื่อไฟล์เผื่อหาไม่เจอจะได้เอามาดูว่าชื่อไฟล์อะไร
-                debug_files = [f for f in tfs if 'log' in f.lower() or 'lc' in f.lower()]
-                return {"status": "not_found", "debug": debug_files}
+            if not lcf: return {"status": "not_found"}
             
             rt = ET.fromstring(tz.read(lcf))
             for el in rt.iter():
                 if '}' in el.tag: el.tag = el.tag.split('}', 1)[1]
             
             logs = []
-            # ดึง Event ID และเวลาทั้งหมด
             for node in rt.iter():
                 m_id = node.find('MessageId')
                 if m_id is None: m_id = node.find('MessageID')
                 if m_id is not None and m_id.text:
-                    ts = node.find('Timestamp')
-                    if ts is None: ts = node.find('CreationTimeStamp')
+                    # แก้ไขการดึงเวลา (กวาดหาทุก tag ที่มีคำว่า time)
+                    ts_text = "-"
+                    for ch in node:
+                        if 'time' in ch.tag.lower() or 'date' in ch.tag.lower():
+                            if ch.text: ts_text = ch.text.strip(); break
+                            
                     ms = node.find('Message')
                     logs.append({
                         "Code": m_id.text.strip().upper(),
-                        "Time": ts.text.strip() if ts is not None else "-",
+                        "Time": ts_text,
                         "Details": ms.text.strip() if ms is not None else "-"
                     })
-            return {"status": "success", "data": logs, "file_used": lcf}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+            return {"status": "success", "data": logs}
+    except Exception as e: return {"status": "error"}
 
 # ==========================================
 # ⚙️ 3. ฟังก์ชันแกะข้อมูลฮาร์ดแวร์
@@ -100,7 +97,6 @@ def parse_tsr(up_file):
                     ad = {a.get("@Name", a.get("Name")).upper(): str(a.get("#text", a.get("Value", a.get("text")))).strip() for a in ats if a.get("@Name", a.get("Name"))}
                     ad["_ID_"] = c.get("@FQDD", c.get("FQDD", "")).upper()
                     add_item(ad)
-                    
             if xfs:
                 for f in xfs:
                     try:
@@ -131,100 +127,112 @@ def parse_tsr(up_file):
             elif 'IPV4' in id_ or 'IDRAC' in id_:
                 ip = ad.get('CURRENTIPADDRESS', ad.get('ADDRESS'))
                 if ip and ip not in ['0.0.0.0', '::', '127.0.0.1']: si['IP iDRAC'] = ip
-                
             elif 'CPU' in id_:
                 m = ad.get('MODEL', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if m != '-':
-                    clk = f"{ad.get('CURRENTCLOCKSPEED','-')} (max {ad.get('MAXCLOCKSPEED','-')})"
-                    cp.append({"Model": m, "Clock": clk, "Cores": ad.get('NUMBEROFPROCESSORCORES', ad.get('CORECOUNT', '-')), "Threads": ad.get('NUMBEROFENABLEDTHREADS', ad.get('THREADCOUNT', '-')), "L1": ad.get('PRIMARYCACHE', ad.get('L1CACHE', '-')), "L2": ad.get('SECONDARYCACHE', ad.get('L2CACHE', '-')), "L3": ad.get('TERTIARYCACHE', ad.get('L3CACHE', '-')), "Microcode": ad.get('MICROCODEVERSION', ad.get('MICROCODE', '-'))})
-            
+                if m != '-': cp.append({"Model": m, "Clock": f"{ad.get('CURRENTCLOCKSPEED','-')} (max {ad.get('MAXCLOCKSPEED','-')})", "Cores": ad.get('NUMBEROFPROCESSORCORES', ad.get('CORECOUNT', '-')), "Threads": ad.get('NUMBEROFENABLEDTHREADS', ad.get('THREADCOUNT', '-')), "L1": ad.get('PRIMARYCACHE', ad.get('L1CACHE', '-')), "L2": ad.get('SECONDARYCACHE', ad.get('L2CACHE', '-')), "L3": ad.get('TERTIARYCACHE', ad.get('L3CACHE', '-')), "Microcode": ad.get('MICROCODEVERSION', ad.get('MICROCODE', '-'))})
             elif 'DIMM' in id_ or 'MEMORY' in id_:
                 sz = f_ram(ad.get('SIZE', ad.get('CAPACITY', '-')))
-                if sz != '-':
-                    rm.append({"Slot": ad.get('DEVICEDESCRIPTION', ad.get('NAME', id_.split(':')[-1])), "Size": sz, "Speed": ad.get('SPEED', ad.get('OPERATINGSPEED', '-')), "Manufacturer": ad.get('MANUFACTURER', '-'), "Part Number": ad.get('PARTNUMBER', '-'), "Serial Number": ad.get('SERIALNUMBER', '-')})
-            
+                if sz != '-': rm.append({"Slot": ad.get('DEVICEDESCRIPTION', ad.get('NAME', id_.split(':')[-1])), "Size": sz, "Speed": ad.get('SPEED', ad.get('OPERATINGSPEED', '-')), "Manufacturer": ad.get('MANUFACTURER', '-'), "Part Number": ad.get('PARTNUMBER', '-'), "Serial Number": ad.get('SERIALNUMBER', '-')})
             elif 'DISK' in id_ or 'PHYSICALDISK' in id_:
                 sz = f_dsk(ad.get('SIZE', ad.get('SIZEINBYTES', ad.get('CAPACITY', '-'))))
-                if sz != '-':
-                    slot = ad.get('FQDD', id_)
-                    dk.append({"Slot": slot, "RAID State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": ad.get('MODEL', ad.get('PRODUCTID', '-')), "Size": sz, "Serial": ad.get('SERIALNUMBER', '-'), "SAS Address": ad.get('SASADDRESS', '-'), "Firmware": ad.get('REVISION', ad.get('FIRMWAREVERSION', '-'))})
-            
+                if sz != '-': dk.append({"Slot": ad.get('FQDD', id_), "RAID State": ad.get('STATE', ad.get('RAIDSTATUS', '-')), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": ad.get('MODEL', ad.get('PRODUCTID', '-')), "Size": sz, "Serial": ad.get('SERIALNUMBER', '-'), "SAS Address": ad.get('SASADDRESS', '-'), "Firmware": ad.get('REVISION', ad.get('FIRMWAREVERSION', '-'))})
             elif any(x in id_ for x in ['RAID', 'AHCI', 'CONTROLLER']):
-                loc = ad.get('FQDD', id_)
-                vnd = ad.get('MANUFACTURER', ad.get('VENDORID', '-'))
                 mdl = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                fw = ad.get('FIRMWAREVERSION', ad.get('PACKAGEVERSION', ad.get('VERSION', '-')))
-                if mdl != '-' and 'USB' not in mdl.upper() and 'BATTERY' not in mdl.upper():
-                    ct.append({"Location": loc, "Vendor": vnd, "Model": mdl, "Speed": ad.get('LINKSPEED', '-'), "Mode": ad.get('CONTROLLERMODE', '-'), "Firmware": fw})
-            
+                if mdl != '-' and 'USB' not in mdl.upper() and 'BATTERY' not in mdl.upper(): ct.append({"Location": ad.get('FQDD', id_), "Vendor": ad.get('MANUFACTURER', ad.get('VENDORID', '-')), "Model": mdl, "Speed": ad.get('LINKSPEED', '-'), "Mode": ad.get('CONTROLLERMODE', '-'), "Firmware": ad.get('FIRMWAREVERSION', ad.get('PACKAGEVERSION', ad.get('VERSION', '-')))})
             elif 'NIC' in id_ or 'ETHERNET' in id_:
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if nm != '-' and 'TRANSCEIVER' not in nm.upper():
-                    spd = ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-'))
-                    lk = link_st(ad.get('LINKSTATUS', '-'))
-                    mac = ad.get('CURRENTMACADDRESS', ad.get('MACADDRESS', '-'))
-                    fw = ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))
-                    nc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": spd, "Link": lk, "MAC Address": mac, "Firmware": fw})
-
+                if nm != '-' and 'TRANSCEIVER' not in nm.upper(): nc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-')), "Link": link_st(ad.get('LINKSTATUS', '-')), "MAC Address": ad.get('CURRENTMACADDRESS', ad.get('MACADDRESS', '-')), "Firmware": ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))})
             elif 'FC' in id_ or 'FIBRECHANNEL' in id_:
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
-                if nm != '-' and 'TRANSCEIVER' not in nm.upper():
-                    spd = ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-'))
-                    lk = link_st(ad.get('LINKSTATUS', '-'))
-                    wwn = ad.get('PORTWWN', ad.get('VIRTUALWWPN', ad.get('WWN', '-')))
-                    fw = ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))
-                    fc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": spd, "Link": lk, "WWN": wwn, "Firmware": fw})
+                if nm != '-' and 'TRANSCEIVER' not in nm.upper(): fc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-')), "Link": link_st(ad.get('LINKSTATUS', '-')), "WWN": ad.get('PORTWWN', ad.get('VIRTUALWWPN', ad.get('WWN', '-'))), "Firmware": ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))})
 
         def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
+        return {"System Information": [{"Attribute": k, "Value": v} for k, v in si.items()], "Processors": add_idx(cp), "Memory": add_idx(rm), "Physical Disks": add_idx(dk), "Storage Controllers": add_idx(ct), "Ethernet": add_idx(nc), "Fibre Channel": add_idx(fc)}
+    except Exception: return {}
 
-        return {
-            "System Information": [{"Attribute": k, "Value": v} for k, v in si.items()],
-            "Processors": add_idx(cp),
-            "Memory": add_idx(rm),
-            "Physical Disks": add_idx(dk),
-            "Storage Controllers": add_idx(ct),
-            "Ethernet": add_idx(nc),
-            "Fibre Channel": add_idx(fc)
-        }
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return {}
-
-def exp_docx(pd):
+# ==========================================
+# ⚙️ 4. ฟังก์ชัน Export Word (SOC Audit Template)
+# ==========================================
+def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     from docx import Document
     from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+    
     dc = Document()
-    tp = dc.add_paragraph()
-    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    tr = tp.add_run("TSR Log Hardware Summary")
-    tr.font.size = Pt(18); tr.font.bold = True; tr.font.color.rgb = RGBColor(26, 82, 118)
-    for sn, rcs in pd.items():
-        if not rcs: continue
-        hd = dc.add_heading(sn, level=2)
-        hd.runs[0].font.color.rgb = RGBColor(26, 82, 118)
-        hs = list(rcs[0].keys())
-        tb = dc.add_table(rows=1, cols=len(hs))
-        tb.style = 'Table Grid'
-        hc = tb.rows[0].cells
-        for i, h in enumerate(hs):
-            hc[i].text = str(h)
-            hc[i].paragraphs[0].runs[0].font.bold = True
-            hc[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
-            sh = OxmlElement('w:shd')
-            sh.set(qn('w:val'), 'clear'); sh.set(qn('w:color'), 'auto'); sh.set(qn('w:fill'), "1A5276")
-            hc[i]._tc.get_or_add_tcPr().append(sh)
-        for rc in rcs:
-            rc_cells = tb.add_row().cells
-            for i, h in enumerate(hs): rc_cells[i].text = str(rc.get(h, ""))
-        dc.add_paragraph()
+    
+    # ส่วนหัว
+    dc.add_heading('Template: Request for Data Erase & Server Repurposing (V3)', 0)
+    dc.add_paragraph('เทมเพลตเอกสารที่ปรับปรุงตามข้อมูลปฏิบัติงานจริง (Dell PowerEdge R740xd ผ่านทาง Lifecycle Controller)')
+    
+    # ---------------- ตารางที่ 1: Device Specs ----------------
+    hd1 = dc.add_heading('1. ตารางข้อมูลรายละเอียดอุปกรณ์และการประเมินเวลา (Device Specifications & Execution Baseline)', 2)
+    hd1.runs[0].font.size = Pt(12); hd1.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    
+    si = {i['Attribute']: i['Value'] for i in hw_data.get('System Information', [])}
+    cpu = hw_data.get('Processors', [{}])[0].get('Model', '-') if hw_data.get('Processors') else '-'
+    disks = hw_data.get('Physical Disks', [])
+    
+    tb1 = dc.add_table(rows=1, cols=2)
+    tb1.style = 'Table Grid'
+    tb1.rows[0].cells[0].text = "หัวข้อข้อมูล (Field)"; tb1.rows[0].cells[1].text = "รายละเอียด (Details / Baseline)"
+    
+    t1_data = [
+        ("1. อุปกรณ์ / รุ่น (Model)", si.get('Model', '-')),
+        ("2. Serial Number (Service Tag)", si.get('Service Tag', '-')),
+        ("3. Hostname", si.get('Hostname', '-')),
+        ("4. Location", loc_name),
+        ("5. IP iDRAC", si.get('IP iDRAC', '-')),
+        ("6. Disk & Storage Details", f"Cryptographic Erase Disks (จำนวน {len(disks)} Disks) พร้อมทำ Clear Hardware Cache"),
+        ("7. CPU Details", cpu),
+        ("8. Duration Time (จากสถิติใช้งานจริง)", "10 Minutes (รวมขั้นตอนการเปิดเครื่อง Power On, ทำลายข้อมูล และระบบทำ Reboot / Shut Down ทั้งหมดแล้ว)")
+    ]
+    for k, v in t1_data:
+        r = tb1.add_row().cells
+        r[0].text, r[1].text = k, v
+    dc.add_paragraph()
+
+    # ---------------- ตารางที่ 2: SOC Operation Log ----------------
+    hd2 = dc.add_heading('2. ตารางบันทึกขั้นตอนปฏิบัติงานและจุดแนบหลักฐาน (SOC Operation Log & LCC Artifact Template)', 2)
+    hd2.runs[0].font.size = Pt(12); hd2.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    
+    tb2 = dc.add_table(rows=1, cols=4)
+    tb2.style = 'Table Grid'
+    for i, h in enumerate(["ขั้นตอนการทำงาน (Dell LCC Process)", "เวลาเริ่ม - สิ้นสุด", "หลักฐานที่ต้องบันทึก / รหัสระบบ", "ผลการตรวจ"]): 
+        tb2.rows[0].cells[i].text = h
+    
+    def get_times(codes):
+        ts = [l['Time'] for l in lc_logs if l['Code'] in codes and l['Time'] != '-']
+        if not ts: return "___________", "_________", "[ ] Pass\n[ ] Fail"
+        ts.sort()
+        return ts[0], ts[-1], "[X] Pass\n[ ] Fail"
+
+    s1_s, s1_e, s1_r = get_times(['SYS1000', 'SYS162'])
+    s3_s, s3_e, s3_r = get_times(['SYS144', 'SYS146', 'SYS153'])
+    s4_s, s4_e, s4_r = get_times(['SYS201', 'SYS150', 'SYS151', 'SYS1001'])
+
+    t2_data = [
+        ("1. Pre-Check & Initial Power On\nเปิดเซิร์ฟเวอร์เพื่อเตรียมทำ System Erase Tasks", f"เริ่ม: {s1_s}\nสิ้นสุด: {s1_e}", "- ยืนยันรหัส Log: SYS1000\n- ยืนยันรหัส Log: SYS162", s1_r),
+        ("2. Launch Repurpose or Retire System\nเข้าเมนูตั้งค่าและเลือกส่วนประกอบที่ต้องการลบถาวร", "เริ่ม: ___________\nสิ้นสุด: _________", "- เลือกฟังก์ชัน: BIOS reset default, iDRAC reset, Lifecycle Controller Data, Storage Components, Cryptographic Erase Disks", "[ ] Pass\n[ ] Fail"),
+        ("3. Storage Data Erasing (Crypto Erase)\nระบบทำการลบข้อมูลบน Drives และ Hardware Cache", f"เริ่ม: {s3_s}\nสิ้นสุด: {s3_e}", "- ยืนยันรหัส Log: SYS144\n- ยืนยันรหัส Log: SYS146\n- ยืนยันรหัส Log: SYS153", s3_r),
+        ("4. Job Verification & Completion Status\nลบข้อมูลเสร็จสมบูรณ์และระบบสั่งปิดการทำงาน", f"เริ่ม: {s4_s}\nสิ้นสุด: {s4_e}", "- ยืนยันรหัส Log: SYS201\n- ยืนยันรหัส Log: SYS150\n- ยืนยันรหัส Log: SYS151\n- ยืนยันรหัส Log: SYS1001", s4_r)
+    ]
+    for d1, d2, d3, d4 in t2_data:
+        r = tb2.add_row().cells
+        r[0].text, r[1].text, r[2].text, r[3].text = d1, d2, d3, d4
+    dc.add_paragraph()
+
+    # ---------------- ตารางที่ 3: Compliance ----------------
+    hd3 = dc.add_heading('3. ข้อควรระวังและการส่งมอบ Artifact (Security Audit Compliance)', 2)
+    hd3.runs[0].font.size = Pt(12); hd3.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    dc.add_paragraph('การเก็บรักษาหลักฐาน (Artifact Retention): หลังจากทีม SOC ดำเนินการล้างข้อมูลเสร็จสิ้น จะต้องทำการส่งภาพถ่ายหน้าจอสรุปผลจากหน้าจอ Lifecycle Controller และทำการ Export ไฟล์ iDRAC Lifecycle Log ที่ระบุรหัส SYS146, SYS201, SYS150 และ SYS151 พร้อมเวลา Time Stamp เพื่อใช้แนบท้ายเป็นเอกสารปิดงาน (Artifact Check-off)')
+
     bf = io.BytesIO(); dc.save(bf); bf.seek(0)
     return bf
 
 # ==========================================
-# 🖥️ 4. ส่วนหน้าเว็บ (Streamlit UI)
+# 🖥️ 5. ส่วนหน้าเว็บ (Streamlit UI)
 # ==========================================
 st.set_page_config(page_title="TSR Log Tool", page_icon="🖥️", layout="wide")
 st.title("🖥️ Server Inventory & Data Erase Audit Tool")
@@ -246,17 +254,6 @@ if uf:
                 if r:
                     st.markdown(f"#### 🔹 {s}")
                     st.dataframe(r, hide_index=True, use_container_width=True)
-            
-            st.write("---")
-            if st.button("🔄 ส่งออกรายงานฮาร์ดแวร์เป็น Word"):
-                try:
-                    df = exp_docx(hw_data)
-                    sys_info = hw_data.get("System Information", [])
-                    hn = next((i['Value'] for i in sys_info if i['Attribute'] == "Hostname"), "Unknown")
-                    stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
-                    fn = f"{hn}_{stg}.docx".replace(" ", "_").replace("/", "-")
-                    st.download_button("📥 ดาวน์โหลด Word (Hardware)", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                except Exception as e: st.error(f"Error: {e}")
 
     # ------------------- TAB 2 -------------------
     with tab2:
@@ -264,26 +261,34 @@ if uf:
         
         if lc_logs.get("status") == "not_found":
             st.warning("⚠️ ไม่พบไฟล์ Lclog.xml หรือ LifecycleLog.xml ใน ZIP นี้")
-            with st.expander("🔍 คลิกดูรายชื่อไฟล์ Log ที่มีในเครื่องนี้ (เพื่อช่วยตรวจสอบชื่อไฟล์)"):
-                st.write(lc_logs.get("debug", []))
-                
-        elif lc_logs.get("status") == "error":
-            st.error(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ Log: {lc_logs.get('message')}")
-            
         elif lc_logs.get("status") == "success":
             logs_data = lc_logs.get("data", [])
-            st.caption(f"📂 อ่านข้อมูลสำเร็จจากไฟล์: `{lc_logs.get('file_used', '')}`")
-            
-            # ค้นหารหัสตามมาตรฐาน SOC
             target_ids = ['SYS1000', 'SYS162', 'SYS144', 'SYS146', 'SYS153', 'SYS201', 'SYS150', 'SYS151', 'SYS1001']
             found_logs = [log for log in logs_data if log["Code"] in target_ids]
             
             if len(found_logs) > 0:
                 st.success(f"✅ พบหลักฐานการทำ Data Erase ทั้งหมด {len(found_logs)} รายการ")
                 st.dataframe(found_logs, hide_index=True, use_container_width=True)
+                
+                st.write("---")
+                st.markdown("### 📄 สร้างเอกสาร Data Erase Request (SOC Template)")
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    loc_input = st.text_input("ระบุ Location เครื่อง (เช่น MTG, BKK):", value="MTG")
+                with col2:
+                    st.write("") # เว้นระยะให้ปุ่มตรงกัน
+                    st.write("")
+                    if st.button("🔄 ส่งออกเอกสาร Request เป็น Word (.docx)"):
+                        try:
+                            df = exp_audit_docx(hw_data, logs_data, loc_input)
+                            sys_info = hw_data.get("System Information", [])
+                            stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
+                            fn = f"Data_Erase_Audit_{stg}.docx"
+                            
+                            st.download_button("📥 ดาวน์โหลดเอกสาร Data Erase Request", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        except Exception as e: st.error(f"Error: {e}")
             else:
-                st.error("❌ อ่านไฟล์ Log ได้สำเร็จ แต่ไม่พบรหัส SYS ที่เกี่ยวกับการลบข้อมูล (Data Erase) ในเครื่องนี้เลยครับ")
-                with st.expander("🔍 คลิกดู Log ทั้งหมดในเครื่อง (100 รายการล่าสุด)"):
-                    st.dataframe(logs_data[:100], hide_index=True, use_container_width=True)
+                st.error("❌ ไม่พบรหัส SYS ที่เกี่ยวกับการลบข้อมูล (Data Erase) ในเครื่องนี้เลยครับ")
 
 # --- จบโค้ดตรงนี้ชัวร์ 100% ---
