@@ -4,7 +4,6 @@ import xml.etree.ElementTree as ET
 import json
 import io
 
-# --- ฟังก์ชันหลักในการแกะข้อมูลแบบครอบคลุมทั้ง XML และไฟล์แยกส่วน ---
 def parse_tsr_log(uploaded_file):
     hardware_data = {
         "Model": "-",
@@ -26,7 +25,6 @@ def parse_tsr_log(uploaded_file):
         with zipfile.ZipFile(uploaded_file, 'r') as outer_z:
             all_files = outer_z.namelist()
             
-            # ตรวจสอบโครงสร้าง ZIP ซ้อนภายใน (Nested ZIP)
             inner_zip_name = None
             for fname in all_files:
                 if fname.lower().endswith('.zip'):
@@ -61,7 +59,7 @@ def parse_tsr_log(uploaded_file):
                 if 'sysinfo_' in fname_lower and fname_lower.endswith('.xml'):
                     xml_files_to_parse.append(fname)
 
-            # --- กรณีที่ 1: จัดการไฟล์แบบ JSON ---
+            # --- จัดการไฟล์ JSON ---
             if inventory_json_file:
                 st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}`")
                 json_data = json.loads(target_z.read(inventory_json_file).decode('utf-8', errors='ignore'))
@@ -96,7 +94,7 @@ def parse_tsr_log(uploaded_file):
                     elif ("FC." in fqdd or "FibreChannel." in fqdd) and "ProductName" in attr_dict:
                         fc_list.append(attr_dict["ProductName"])
 
-            # --- กรณีที่ 2: จัดการไฟล์แบบ XML (รองรับไฟล์แยกส่วนย่อย) ---
+            # --- จัดการไฟล์ XML (รองรับ InstanceID แบบใหม่) ---
             elif xml_files_to_parse:
                 if len(xml_files_to_parse) > 1:
                     st.info(f"📄 ตรวจพบไฟล์ Inventory แยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังสกัดข้อมูล...)")
@@ -112,46 +110,62 @@ def parse_tsr_log(uploaded_file):
                             elem.tag = elem.tag.split('}', 1)[1]
                     
                     for comp in root.iter():
-                        fqdd = None
-                        attr_dict = {}
-                        
-                        if comp.tag == 'Component' and comp.get('FQDD'):
+                        # สนใจเฉพาะ Element ที่มีลูกข้างใน (เช่น <DCIM_SystemView>)
+                        if len(comp) > 0:
+                            attr_dict = {}
                             fqdd = comp.get('FQDD')
-                            for attr in comp.findall('Attribute'):
-                                if attr.get('Name'): attr_dict[attr.get('Name')] = attr.text
-                        else:
-                            fqdd_elem = comp.find('FQDD')
-                            if fqdd_elem is not None:
-                                fqdd = fqdd_elem.text
-                                for child in comp:
-                                    attr_dict[child.tag] = child.text
+                            
+                            for child in comp:
+                                attr_dict[child.tag] = child.text
+                                
+                            # ถ้ารูปแบบไม่ใช้ Attribute FQDD ให้ควานหาจาก Tag ลูก
+                            if not fqdd:
+                                fqdd = attr_dict.get('FQDD') or attr_dict.get('InstanceID') or attr_dict.get('DeviceID')
 
-                        if fqdd:
-                            if 'System.Board' in fqdd:
-                                if 'Model' in attr_dict: hardware_data['Model'] = attr_dict['Model']
-                                if 'ServiceTag' in attr_dict: hardware_data['Serial Number (Service Tag)'] = attr_dict['ServiceTag']
-                            elif 'iDRAC.Embedded' in fqdd and 'HostName' in attr_dict:
-                                hardware_data['Hostname'] = attr_dict['HostName']
-                            elif 'IPv4.' in fqdd and 'Address' in attr_dict and attr_dict['Address'] != '0.0.0.0':
-                                hardware_data['IP iDRAC'] = attr_dict['Address']
-                            elif 'CPU.Socket' in fqdd and 'Model' in attr_dict:
-                                cpu_list.append(attr_dict['Model'])
-                            elif 'DIMM.Socket' in fqdd:
-                                size = attr_dict.get('Size')
-                                speed = attr_dict.get('Speed', '')
-                                if size and size not in ['0 MB', '0', '0 Bytes', '-', 'None']:
-                                    ram_list.append(f"{size} ({speed})")
-                            elif 'Disk.' in fqdd or 'PhysicalDisk.' in fqdd:
-                                size = attr_dict.get('Size') or attr_dict.get('SizeInBytes')
-                                media = attr_dict.get('MediaType', '')
-                                if size and str(size) not in ['0', '0 Bytes']:
-                                    disk_list.append(f"{size} {media}")
-                            elif ('RAID.' in fqdd or 'AHCI.' in fqdd) and 'ProductName' in attr_dict:
-                                controller_list.append(attr_dict['ProductName'])
-                            elif 'NIC.' in fqdd and 'ProductName' in attr_dict:
-                                nic_list.append(attr_dict['ProductName'])
-                            elif ('FC.' in fqdd or 'FibreChannel.' in fqdd) and 'ProductName' in attr_dict:
-                                fc_list.append(attr_dict['ProductName'])
+                            if fqdd:
+                                fqdd_upper = fqdd.upper()
+                                
+                                if 'SYSTEM.BOARD' in fqdd_upper:
+                                    if attr_dict.get('Model'): hardware_data['Model'] = attr_dict['Model']
+                                    if attr_dict.get('ServiceTag'): hardware_data['Serial Number (Service Tag)'] = attr_dict['ServiceTag']
+                                    if attr_dict.get('HostName'): hardware_data['Hostname'] = attr_dict['HostName']
+                                    
+                                elif 'IDRAC.EMBEDDED' in fqdd_upper:
+                                    if attr_dict.get('HostName') and hardware_data['Hostname'] == "-": 
+                                        hardware_data['Hostname'] = attr_dict['HostName']
+                                        
+                                elif 'IPV4' in fqdd_upper:
+                                    addr = attr_dict.get('Address') or attr_dict.get('CurrentIPAddress')
+                                    if addr and addr != '0.0.0.0':
+                                        hardware_data['IP iDRAC'] = addr
+                                        
+                                elif 'CPU.SOCKET' in fqdd_upper:
+                                    model = attr_dict.get('Model') or attr_dict.get('DeviceDescription')
+                                    if model: cpu_list.append(model)
+                                    
+                                elif 'DIMM.SOCKET' in fqdd_upper:
+                                    size = attr_dict.get('Size') or attr_dict.get('Capacity')
+                                    speed = attr_dict.get('Speed') or attr_dict.get('OperatingSpeed') or ''
+                                    if size and str(size) not in ['0 MB', '0', '0 Bytes', '-', 'None']:
+                                        ram_list.append(f"{size} ({speed})")
+                                        
+                                elif 'DISK.' in fqdd_upper or 'PHYSICALDISK.' in fqdd_upper:
+                                    size = attr_dict.get('Size') or attr_dict.get('SizeInBytes')
+                                    media = attr_dict.get('MediaType') or ''
+                                    if size and str(size) not in ['0', '0 Bytes']:
+                                        disk_list.append(f"{size} {media}")
+                                        
+                                elif 'RAID.' in fqdd_upper or 'AHCI.' in fqdd_upper:
+                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
+                                    if prod: controller_list.append(prod)
+                                        
+                                elif 'NIC.' in fqdd_upper:
+                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
+                                    if prod: nic_list.append(prod)
+                                        
+                                elif 'FC.' in fqdd_upper or 'FIBRECHANNEL.' in fqdd_upper:
+                                    prod = attr_dict.get('ProductName') or attr_dict.get('DeviceDescription')
+                                    if prod: fc_list.append(prod)
             else:
                 st.warning("⚠️ ไม่พบแฟ้มข้อมูลฮาร์ดแวร์ภายในไฟล์ ZIP นี้")
 
@@ -170,7 +184,6 @@ def parse_tsr_log(uploaded_file):
         
     return hardware_data
 
-# --- ฟังก์ชันสร้างไฟล์ Word .docx ป้องกันปัญหาทองเหลืองหลุด/แครช ---
 def export_to_docx(data):
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -213,7 +226,6 @@ def export_to_docx(data):
     docx_buffer.seek(0)
     return docx_buffer
 
-# --- การตั้งค่า UI สำหรับการใช้งานจริง ---
 st.set_page_config(page_title="TSR Log Hardware Extractor", page_icon="🖥️", layout="wide")
 st.title("🖥️ TSR Log Hardware Extractor")
 st.subheader("อัปโหลดไฟล์ Dell TSR Log (.zip) เพื่อดึงข้อมูล Inventory เสมือนในหน้า Lifecycle")
