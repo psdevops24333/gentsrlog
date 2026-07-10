@@ -18,7 +18,8 @@ def parse_tsr_log(uploaded_file):
         "FC Channel": "-"
     }
     
-    cpu_list, ram_list, disk_list = [], []
+    # แก้ไขบั๊กตรงนี้เรียบร้อยครับ (มีวงเล็บ [] ครบ 3 อัน)
+    cpu_list, ram_list, disk_list = [], [], []
     nic_list, fc_list, controller_list = [], [], []
     
     try:
