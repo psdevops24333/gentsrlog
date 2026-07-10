@@ -30,7 +30,7 @@ def link_st(v):
     return v if v else '-'
 
 # ==========================================
-# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (อัปเดตเรื่องเวลา)
+# ⚙️ 2. ฟังก์ชันแกะข้อมูล Lifecycle Log (แก้ไขดักจับ Attributes)
 # ==========================================
 def parse_lc_log(up_file):
     try:
@@ -49,23 +49,28 @@ def parse_lc_log(up_file):
             
             logs = []
             for node in rt.iter():
-                m_id = node.find('MessageId')
-                if m_id is None: m_id = node.find('MessageID')
-                if m_id is not None and m_id.text:
-                    # แก้ไขการดึงเวลา (กวาดหาทุก tag ที่มีคำว่า time)
-                    ts_text = "-"
-                    for ch in node:
-                        if 'time' in ch.tag.lower() or 'date' in ch.tag.lower():
-                            if ch.text: ts_text = ch.text.strip(); break
-                            
+                # ดักจับทั้งแอตทริบิวต์ในโหนดหลัก <Event ...> และแท็กย่อยด้านใน
+                m_id = node.attrib.get('MessageID') or node.attrib.get('MessageId') or node.find('MessageId') or node.find('MessageID')
+                m_id_val = m_id.text.strip().upper() if hasattr(m_id, 'text') and m_id.text else str(m_id).strip().upper()
+                
+                if m_id_val and m_id_val != "NONE":
+                    ts_val = node.attrib.get('TIMESTAMP') or node.attrib.get('Timestamp') or node.attrib.get('CreationTimeStamp')
+                    if not ts_val:
+                        for ch in node:
+                            if 'time' in ch.tag.lower() or 'date' in ch.tag.lower():
+                                if ch.text: ts_val = ch.text.strip(); break
+                    
                     ms = node.find('Message')
+                    ms_val = ms.text.strip() if ms is not None and ms.text else node.attrib.get('Message', '-')
+                    
                     logs.append({
-                        "Code": m_id.text.strip().upper(),
-                        "Time": ts_text,
-                        "Details": ms.text.strip() if ms is not None else "-"
+                        "Code": m_id_val,
+                        "Time": ts_val if ts_val else "-",
+                        "Details": ms_val
                     })
             return {"status": "success", "data": logs}
-    except Exception as e: return {"status": "error"}
+    except Exception as e: 
+        return {"status": "error"}
 
 # ==========================================
 # ⚙️ 3. ฟังก์ชันแกะข้อมูลฮาร์ดแวร์
@@ -146,12 +151,45 @@ def parse_tsr(up_file):
                 nm = ad.get('PRODUCTNAME', ad.get('DEVICEDESCRIPTION', ad.get('NAME', '-')))
                 if nm != '-' and 'TRANSCEIVER' not in nm.upper(): fc.append({"Location": ad.get('FQDD', id_), "Model": nm, "Speed": ad.get('LINKSPEED', ad.get('CURRENTSPEED', '-')), "Link": link_st(ad.get('LINKSTATUS', '-')), "WWN": ad.get('PORTWWN', ad.get('VIRTUALWWPN', ad.get('WWN', '-'))), "Firmware": ad.get('FIRMWAREVERSION', ad.get('FAMILYVERSION', ad.get('DEVICEVERSION', '-')))})
 
-        def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
+         def add_idx(lst): return [{"Index": i+1, **d} for i, d in enumerate(lst)]
         return {"System Information": [{"Attribute": k, "Value": v} for k, v in si.items()], "Processors": add_idx(cp), "Memory": add_idx(rm), "Physical Disks": add_idx(dk), "Storage Controllers": add_idx(ct), "Ethernet": add_idx(nc), "Fibre Channel": add_idx(fc)}
     except Exception: return {}
 
+def exp_docx(pd):
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    dc = Document()
+    tp = dc.add_paragraph()
+    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tr = tp.add_run("TSR Log Hardware Summary")
+    tr.font.size = Pt(18); tr.font.bold = True; tr.font.color.rgb = RGBColor(26, 82, 118)
+    for sn, rcs in pd.items():
+        if not rcs: continue
+        hd = dc.add_heading(sn, level=2)
+        hd.runs[0].font.color.rgb = RGBColor(26, 82, 118)
+        hs = list(rcs[0].keys())
+        tb = dc.add_table(rows=1, cols=len(hs))
+        tb.style = 'Table Grid'
+        hc = tb.rows[0].cells
+        for i, h in enumerate(hs):
+            hc[i].text = str(h)
+            hc[i].paragraphs[0].runs[0].font.bold = True
+            hc[i].paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+            sh = OxmlElement('w:shd')
+            sh.set(qn('w:val'), 'clear'); sh.set(qn('w:color'), 'auto'); sh.set(qn('w:fill'), "1A5276")
+            hc[i]._tc.get_or_add_tcPr().append(sh)
+        for rc in rcs:
+            rc_cells = tb.add_row().cells
+            for i, h in enumerate(hs): rc_cells[i].text = str(rc.get(h, ""))
+        dc.add_paragraph()
+    bf = io.BytesIO(); dc.save(bf); bf.seek(0)
+    return bf
+
 # ==========================================
-# ⚙️ 4. ฟังก์ชัน Export Word (SOC Audit Template)
+# ⚙️ 4. ฟังก์ชันสร้างเอกสาร Request แบบตรงสเปก V3
 # ==========================================
 def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     from docx import Document
@@ -162,71 +200,97 @@ def exp_audit_docx(hw_data, lc_logs, loc_name="MTG"):
     
     dc = Document()
     
-    # ส่วนหัว
-    dc.add_heading('Template: Request for Data Erase & Server Repurposing (V3)', 0)
-    dc.add_paragraph('เทมเพลตเอกสารที่ปรับปรุงตามข้อมูลปฏิบัติงานจริง (Dell PowerEdge R740xd ผ่านทาง Lifecycle Controller)')
+    # หัวข้อหลักสอดคล้องกับหัวไฟล์เอกสาร V3
+    title_p = dc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    title_run = title_p.add_run("Request for Data Erase & Server Repurposing") [cite: 1]
+    title_run.font.size = Pt(16)
+    title_run.font.bold = True
+    title_run.font.color.rgb = RGBColor(0, 51, 102)
     
     # ---------------- ตารางที่ 1: Device Specs ----------------
-    hd1 = dc.add_heading('1. ตารางข้อมูลรายละเอียดอุปกรณ์และการประเมินเวลา (Device Specifications & Execution Baseline)', 2)
-    hd1.runs[0].font.size = Pt(12); hd1.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    hd1 = dc.add_heading("1. ตารางข้อมูลรายละเอียดอุปกรณ์และการประเมินเวลา (Device Specifications & Execution Baseline)", level=2)
+    hd1.runs[0].font.size = Pt(11)
+    hd1.runs[0].font.color.rgb = RGBColor(0, 0, 0)
     
     si = {i['Attribute']: i['Value'] for i in hw_data.get('System Information', [])}
-    cpu = hw_data.get('Processors', [{}])[0].get('Model', '-') if hw_data.get('Processors') else '-'
+    cpu_model = hw_data.get('Processors', [{}])[0].get('Model', '-') if hw_data.get('Processors') else '-'
     disks = hw_data.get('Physical Disks', [])
+    
+    # บันทึกรายละเอียดดิสก์ทั้งหมด
+    disk_details = f"Cryptographic Erase Disks (จำนวน {len(disks)} ลูก): "
+    if disks:
+        disk_details += ", ".join([f"Slot {d.get('Slot','-')} ({d.get('Size','-')})" for d in disks])
+    disk_details += " พร้อมทำ Clear Hardware Cache"
     
     tb1 = dc.add_table(rows=1, cols=2)
     tb1.style = 'Table Grid'
-    tb1.rows[0].cells[0].text = "หัวข้อข้อมูล (Field)"; tb1.rows[0].cells[1].text = "รายละเอียด (Details / Baseline)"
-    
-    t1_data = [
+    tb1.rows[0].cells[0].text = "หัวข้อข้อมูล (Field)"
+    tb1.rows[0].cells[1].text = "รายละเอียด (Details / Baseline)"
+    for cell in tb1.rows[0].cells:
+        cell.paragraphs[0].runs[0].font.bold = True
+        
+    t1_fields = [
         ("1. อุปกรณ์ / รุ่น (Model)", si.get('Model', '-')),
         ("2. Serial Number (Service Tag)", si.get('Service Tag', '-')),
         ("3. Hostname", si.get('Hostname', '-')),
         ("4. Location", loc_name),
         ("5. IP iDRAC", si.get('IP iDRAC', '-')),
-        ("6. Disk & Storage Details", f"Cryptographic Erase Disks (จำนวน {len(disks)} Disks) พร้อมทำ Clear Hardware Cache"),
-        ("7. CPU Details", cpu),
+        ("6. Disk & Storage Details", disk_details),
+        ("7. CPU Details", cpu_model),
         ("8. Duration Time (จากสถิติใช้งานจริง)", "10 Minutes (รวมขั้นตอนการเปิดเครื่อง Power On, ทำลายข้อมูล และระบบทำ Reboot / Shut Down ทั้งหมดแล้ว)")
     ]
-    for k, v in t1_data:
+    for k, v in t1_fields:
         r = tb1.add_row().cells
         r[0].text, r[1].text = k, v
     dc.add_paragraph()
 
     # ---------------- ตารางที่ 2: SOC Operation Log ----------------
-    hd2 = dc.add_heading('2. ตารางบันทึกขั้นตอนปฏิบัติงานและจุดแนบหลักฐาน (SOC Operation Log & LCC Artifact Template)', 2)
-    hd2.runs[0].font.size = Pt(12); hd2.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    hd2 = dc.add_heading("2. ตารางบันทึกขั้นตอนปฏิบัติงานและจุดแนบหลักฐาน (SOC Operation Log & LCC Artifact Template)", level=2) [cite: 2]
+    hd2.runs[0].font.size = Pt(11)
+    hd2.runs[0].font.color.rgb = RGBColor(0, 0, 0)
     
     tb2 = dc.add_table(rows=1, cols=4)
     tb2.style = 'Table Grid'
-    for i, h in enumerate(["ขั้นตอนการทำงาน (Dell LCC Process)", "เวลาเริ่ม - สิ้นสุด", "หลักฐานที่ต้องบันทึก / รหัสระบบ", "ผลการตรวจ"]): 
+    headers_t2 = ["ขั้นตอนการทำงาน (Dell LCC Process)", "เวลาเริ่ม - สิ้นสุด", "หลักฐานที่ต้องบันทึก / รหัสระบบ (Required Logs & Artifacts)", "ผลการตรวจ"] [cite: 4]
+    for i, h in enumerate(headers_t2):
         tb2.rows[0].cells[i].text = h
+        tb2.rows[0].cells[i].paragraphs[0].runs[0].font.bold = True
     
-    def get_times(codes):
+    # ดึงเวลาเฉพาะเจาะจงตามเงื่อนไข SYS Code
+    def filter_timestamps(codes):
         ts = [l['Time'] for l in lc_logs if l['Code'] in codes and l['Time'] != '-']
-        if not ts: return "___________", "_________", "[ ] Pass\n[ ] Fail"
+        if not ts: return "___________", "_________", "[ ] Pass\n[ ] Fail" [cite: 4]
         ts.sort()
         return ts[0], ts[-1], "[X] Pass\n[ ] Fail"
 
-    s1_s, s1_e, s1_r = get_times(['SYS1000', 'SYS162'])
-    s3_s, s3_e, s3_r = get_times(['SYS144', 'SYS146', 'SYS153'])
-    s4_s, s4_e, s4_r = get_times(['SYS201', 'SYS150', 'SYS151', 'SYS1001'])
+    s1_s, s1_e, s1_r = filter_timestamps(['SYS1000', 'SYS162'])
+    s2_s, s2_e, s2_r = filter_timestamps(['SYS150']) # ดึงส่วน System Erase Job
+    s3_s, s3_e, s3_r = filter_timestamps(['SYS144', 'SYS146', 'SYS153'])
+    s4_s, s4_e, s4_r = filter_timestamps(['SYS201', 'SYS151', 'SYS1001'])
 
-    t2_data = [
-        ("1. Pre-Check & Initial Power On\nเปิดเซิร์ฟเวอร์เพื่อเตรียมทำ System Erase Tasks", f"เริ่ม: {s1_s}\nสิ้นสุด: {s1_e}", "- ยืนยันรหัส Log: SYS1000\n- ยืนยันรหัส Log: SYS162", s1_r),
-        ("2. Launch Repurpose or Retire System\nเข้าเมนูตั้งค่าและเลือกส่วนประกอบที่ต้องการลบถาวร", "เริ่ม: ___________\nสิ้นสุด: _________", "- เลือกฟังก์ชัน: BIOS reset default, iDRAC reset, Lifecycle Controller Data, Storage Components, Cryptographic Erase Disks", "[ ] Pass\n[ ] Fail"),
-        ("3. Storage Data Erasing (Crypto Erase)\nระบบทำการลบข้อมูลบน Drives และ Hardware Cache", f"เริ่ม: {s3_s}\nสิ้นสุด: {s3_e}", "- ยืนยันรหัส Log: SYS144\n- ยืนยันรหัส Log: SYS146\n- ยืนยันรหัส Log: SYS153", s3_r),
-        ("4. Job Verification & Completion Status\nลบข้อมูลเสร็จสมบูรณ์และระบบสั่งปิดการทำงาน", f"เริ่ม: {s4_s}\nสิ้นสุด: {s4_e}", "- ยืนยันรหัส Log: SYS201\n- ยืนยันรหัส Log: SYS150\n- ยืนยันรหัส Log: SYS151\n- ยืนยันรหัส Log: SYS1001", s4_r)
+    t2_rows = [
+        ("1. Pre-Check & Initial Power On\nเปิดเซิร์ฟเวอร์เพื่อเตรียมทำ System Erase Tasks", f"เริ่ม: {s1_s}\nสิ้นสุด: {s1_e}", "- ยืนยันรหัส Log:  SYS1000  (System is turning on)\n- ยืนยันรหัส Log:  SYS162  (Turning on the server for System Erase Tasks)", s1_r), [cite: 4]
+        ("2. Launch Repurpose or Retire System\nเข้าเมนูตั้งค่าและเลือกส่วนประกอบที่ต้องการลบถาวร", f"เริ่ม: {s2_s}\nสิ้นสุด: {s2_e}", "- เลือกฟังก์ชัน:  BIOS reset default, iDRAC reset, Lifecycle Controller Data, Storage Components, Cryptographic Erase Disks", s2_r), [cite: 4]
+        ("3. Storage Data Erasing (Crypto Erase)\nระบบทำการลบข้อมูลบน Drives และ Hardware Cache", f"เริ่ม: {s3_s}\nสิ้นสุด: {s3_e}", "- ยืนยันรหัส Log:  SYS144  (Starting controller hardware cache data erase)\n- ยืนยันรหัส Log:  SYS146  (Starting cryptographic erase-capable drive erase)\n- ยืนยันรหัส Log:  SYS153  (Deleting hardware cache data for controller)", s3_r), [cite: 4]
+        ("4. Job Verification & Completion Status\nลบข้อมูลเสร็จสมบูรณ์และระบบสั่งปิดการทำงานตัวเครื่อง", f"เริ่ม: {s4_s}\nสิ้นสุด: {s4_e}", "- ยืนยันรหัส Log:  SYS201  (Disk erase operation successfully completed)\n- ยืนยันรหัส Log:  SYS150  (Erase operations successfully completed)\n- ยืนยันรหัส Log:  SYS151  (Completed System Erase)\n- ยืนยันรหัส Log:  SYS1001  (System is turning off)", s4_r) [cite: 4]
     ]
-    for d1, d2, d3, d4 in t2_data:
-        r = tb2.add_row().cells
-        r[0].text, r[1].text, r[2].text, r[3].text = d1, d2, d3, d4
+    for r_data in t2_rows:
+        row = tb2.add_row().cells
+        for idx, text in enumerate(r_data):
+            row[idx].text = text
     dc.add_paragraph()
 
-    # ---------------- ตารางที่ 3: Compliance ----------------
-    hd3 = dc.add_heading('3. ข้อควรระวังและการส่งมอบ Artifact (Security Audit Compliance)', 2)
-    hd3.runs[0].font.size = Pt(12); hd3.runs[0].font.color.rgb = RGBColor(0, 0, 0)
-    dc.add_paragraph('การเก็บรักษาหลักฐาน (Artifact Retention): หลังจากทีม SOC ดำเนินการล้างข้อมูลเสร็จสิ้น จะต้องทำการส่งภาพถ่ายหน้าจอสรุปผลจากหน้าจอ Lifecycle Controller และทำการ Export ไฟล์ iDRAC Lifecycle Log ที่ระบุรหัส SYS146, SYS201, SYS150 และ SYS151 พร้อมเวลา Time Stamp เพื่อใช้แนบท้ายเป็นเอกสารปิดงาน (Artifact Check-off)')
+    # ---------------- ส่วน Compliance ท้ายไฟล์ ----------------
+    hd3 = dc.add_heading("3. ข้อควรระวังและการส่งมอบ Artifact (Security Audit Compliance)", level=2) [cite: 5]
+    hd3.runs[0].font.size = Pt(11)
+    hd3.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+    
+    p3 = dc.add_paragraph()
+    p3.add_run("การเก็บรักษาหลักฐาน (Artifact Retention): ").bold = True [cite: 6]
+    p3.add_run("หลังจากทีม SOC ดำเนินการล้างข้อมูลเสร็จสิ้น จะต้องทำการส่งภาพถ่ายหน้าจอสรุปผลจากหน้าจอ Lifecycle Controller และทำการ Export ไฟล์ iDRAC Lifecycle Log ที่ระบุรหัส SYS146, SYS201, SYS150 และ SYS151 พร้อมเวลา Time Stamp เพื่อใช้แนบท้ายเป็นเอกสารปิดงาน (Artifact Check-off)\n\n") [cite: 6]
+    p3.add_run("ความรวดเร็วของกระบวนการ: ").bold = True [cite: 7]
+    p3.add_run("เนื่องจากตัวเครื่องใช้ระบบ Cryptographic Erase ร่วมกับ NVMe/Supported Disks กระบวนการทางเทคนิคบนดิสก์จริงจะใช้เวลาสั้นมาก (ประมาณ 10 นาที) หากใน Log แสดงเวลาดำเนินการเกินกว่าระยะเวลาปกติอย่างมีนัยสำคัญ ให้ทีม SOC ตรวจสอบประสิทธิภาพการทำงานของ Storage Controller เพิ่มเติม") [cite: 7]
 
     bf = io.BytesIO(); dc.save(bf); bf.seek(0)
     return bf
@@ -257,7 +321,7 @@ if uf:
 
     # ------------------- TAB 2 -------------------
     with tab2:
-        st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)")
+        st.info("📌 อ้างอิงตรวจสอบรหัส Lifecycle Log เพื่อยืนยันกระบวนการ Cryptographic Erase (SOC Standard)") [cite: 6]
         
         if lc_logs.get("status") == "not_found":
             st.warning("⚠️ ไม่พบไฟล์ Lclog.xml หรือ LifecycleLog.xml ใน ZIP นี้")
@@ -277,14 +341,14 @@ if uf:
                 with col1:
                     loc_input = st.text_input("ระบุ Location เครื่อง (เช่น MTG, BKK):", value="MTG")
                 with col2:
-                    st.write("") # เว้นระยะให้ปุ่มตรงกัน
+                    st.write("") 
                     st.write("")
                     if st.button("🔄 ส่งออกเอกสาร Request เป็น Word (.docx)"):
                         try:
                             df = exp_audit_docx(hw_data, logs_data, loc_input)
                             sys_info = hw_data.get("System Information", [])
                             stg = next((i['Value'] for i in sys_info if i['Attribute'] == "Service Tag"), "Unknown")
-                            fn = f"Data_Erase_Audit_{stg}.docx"
+                            fn = f"Data_Erase_Request_{stg}.docx"
                             
                             st.download_button("📥 ดาวน์โหลดเอกสาร Data Erase Request", data=df, file_name=fn, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                         except Exception as e: st.error(f"Error: {e}")
