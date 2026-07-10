@@ -18,7 +18,6 @@ def parse_tsr_log(uploaded_file):
         "FC Channel": "-"
     }
     
-    # แก้ไขบั๊กตรงนี้เรียบร้อยครับ (มีวงเล็บ [] ครบ 3 อัน)
     cpu_list, ram_list, disk_list = [], [], []
     nic_list, fc_list, controller_list = [], [], []
     
@@ -52,15 +51,13 @@ def parse_tsr_log(uploaded_file):
                 if 'hardware_inventory.json' in fname_lower or 'hw_inventory.json' in fname_lower:
                     inventory_json_file = fname
                     break
-                
                 if 'inventory.xml' in fname_lower or 'hw_inventory.xml' in fname_lower:
                     xml_files_to_parse = [fname]
                     break
-                    
                 if 'sysinfo_' in fname_lower and fname_lower.endswith('.xml'):
                     xml_files_to_parse.append(fname)
 
-            # --- 1. จัดการไฟล์ JSON ---
+            # --- จัดการไฟล์ JSON ---
             if inventory_json_file:
                 st.info(f"📄 ตรวจพบไฟล์ข้อมูลแบบ JSON: `{inventory_json_file}`")
                 json_data = json.loads(target_z.read(inventory_json_file).decode('utf-8', errors='ignore'))
@@ -95,9 +92,9 @@ def parse_tsr_log(uploaded_file):
                     elif ("FC." in fqdd or "FibreChannel." in fqdd) and "ProductName" in attr_dict:
                         fc_list.append(attr_dict["ProductName"])
 
-            # --- 2. จัดการไฟล์ XML (ระบบควานหาข้อมูลแบบครอบจักรวาล) ---
+            # --- จัดการไฟล์ XML (แบบทะลวง Property/Value) ---
             elif xml_files_to_parse:
-                st.info(f"📄 ตรวจพบไฟล์ Inventory แยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังสกัดข้อมูลแบบลึก...)")
+                st.info(f"📄 ตรวจพบไฟล์ Inventory แยกส่วนจำนวน {len(xml_files_to_parse)} ไฟล์ (กำลังสกัดข้อมูลแบบลึกสุดขีด...)")
 
                 for fname in xml_files_to_parse:
                     try:
@@ -110,56 +107,85 @@ def parse_tsr_log(uploaded_file):
                                 elem.tag = elem.tag.split('}', 1)[1]
                         
                         for comp in root.iter():
-                            # ดึงเฉพาะก้อนที่มีข้อมูลลูกข้างใน
-                            if len(comp) > 0:
-                                attr_dict = {}
-                                for child in comp:
-                                    if child.text and child.text.strip():
-                                        attr_dict[child.tag.upper()] = child.text.strip()
+                            attr_dict = {}
+                            
+                            # เก็บ Attribute ของตัวมันเอง
+                            for k, v in comp.attrib.items():
+                                attr_dict[k.upper()] = str(v).strip()
                                 
-                                # เอาชื่อ Tag พ่อ หรือ InstanceID มาเป็นตัวระบุประเภทฮาร์ดแวร์
-                                identity = attr_dict.get('INSTANCEID', attr_dict.get('FQDD', comp.tag)).upper()
+                            # แกะข้อมูลลูก (จัดการโครงสร้าง Property/Value)
+                            for child in comp:
+                                tag = child.tag.split('}')[-1].upper()
+                                name_attr = child.get('Name') or child.get('NAME')
+                                
+                                if tag in ['PROPERTY', 'ATTRIBUTE'] and name_attr:
+                                    key = name_attr.upper()
+                                    val_text = ""
+                                    # หาค่าในแท็ก <Value>
+                                    for sub in child:
+                                        if sub.tag.split('}')[-1].upper() == 'VALUE' and sub.text:
+                                            val_text = sub.text.strip()
+                                    if val_text:
+                                        attr_dict[key] = val_text
+                                    elif child.text and child.text.strip():
+                                        attr_dict[key] = child.text.strip()
+                                else:
+                                    if child.text and child.text.strip():
+                                        attr_dict[tag] = child.text.strip()
+                            
+                            comp_tag = comp.tag.split('}')[-1].upper()
+                            identity = attr_dict.get('INSTANCEID', attr_dict.get('FQDD', attr_dict.get('DEVICEID', comp_tag))).upper()
 
-                                # กรองและยัดข้อมูลเข้าตาราง
-                                if 'SYSTEM' in identity or 'BOARD' in identity:
-                                    if attr_dict.get('MODEL'): hardware_data['Model'] = attr_dict['MODEL']
-                                    if attr_dict.get('SERVICETAG'): hardware_data['Serial Number (Service Tag)'] = attr_dict['SERVICETAG']
+                            # กรองเฉพาะโหนดที่เป็นอุปกรณ์
+                            if identity not in ['PROPERTY', 'VALUE', 'ATTRIBUTE']:
+                                
+                                # System / Board
+                                if 'SYSTEM' in identity or 'BOARD' in identity or 'DCIM_SYSTEMVIEW' in identity:
+                                    if attr_dict.get('MODEL') and hardware_data['Model'] == '-': hardware_data['Model'] = attr_dict['MODEL']
+                                    if attr_dict.get('SERVICETAG') and hardware_data['Serial Number (Service Tag)'] == '-': hardware_data['Serial Number (Service Tag)'] = attr_dict['SERVICETAG']
                                     if attr_dict.get('HOSTNAME') and hardware_data['Hostname'] == '-': hardware_data['Hostname'] = attr_dict['HOSTNAME']
                                     
+                                # IP iDRAC
                                 elif 'IPV4' in identity or 'IDRAC' in identity:
                                     ip = attr_dict.get('CURRENTIPADDRESS', attr_dict.get('ADDRESS'))
-                                    if ip and ip != '0.0.0.0' and hardware_data['IP iDRAC'] == '-':
+                                    if ip and ip not in ['0.0.0.0', '::', '127.0.0.1'] and hardware_data['IP iDRAC'] == '-':
                                         hardware_data['IP iDRAC'] = ip
                                         
+                                # CPU
                                 elif 'CPU' in identity:
                                     model = attr_dict.get('MODEL', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
-                                    if model and "CPU" in model.upper(): cpu_list.append(model)
+                                    if model: cpu_list.append(model)
                                         
+                                # RAM
                                 elif 'DIMM' in identity or 'MEMORY' in identity:
                                     size = attr_dict.get('SIZE', attr_dict.get('CAPACITY'))
                                     speed = attr_dict.get('SPEED', attr_dict.get('OPERATINGSPEED', ''))
                                     if size and str(size) not in ['0', '0 MB', '0 Bytes', 'None', '-']:
                                         ram_list.append(f"{size} ({speed})" if speed else str(size))
                                         
-                                elif 'DISK' in identity:
+                                # Physical Disk
+                                elif 'DISK' in identity or 'PHYSICALDISK' in identity:
                                     size = attr_dict.get('SIZE', attr_dict.get('SIZEINBYTES', attr_dict.get('CAPACITY')))
                                     media = attr_dict.get('MEDIATYPE', '')
                                     if size and str(size) not in ['0', '0 Bytes']:
                                         disk_list.append(f"{size} {media}".strip())
                                         
+                                # Controller Card
                                 elif 'RAID' in identity or 'AHCI' in identity or 'CONTROLLER' in identity:
                                     prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
-                                    if prod and 'USB' not in prod.upper(): controller_list.append(prod)
+                                    if prod: controller_list.append(prod)
                                         
-                                elif 'NIC' in identity or 'ETHERNET' in identity or 'NETWORK' in identity:
+                                # NIC
+                                elif 'NIC' in identity or 'ETHERNET' in identity:
                                     prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
                                     if prod: nic_list.append(prod)
                                         
-                                elif 'FC' in identity or 'FIBRE' in identity:
+                                # FC Channel
+                                elif 'FC' in identity or 'FIBRECHANNEL' in identity:
                                     prod = attr_dict.get('PRODUCTNAME', attr_dict.get('DEVICEDESCRIPTION', attr_dict.get('NAME')))
                                     if prod: fc_list.append(prod)
                     except Exception as e:
-                        pass # ข้ามไฟล์ที่พังหรืออ่านไม่ได้
+                        pass
 
             else:
                 st.warning("⚠️ ไม่พบแฟ้มข้อมูลฮาร์ดแวร์ภายในไฟล์ ZIP นี้")
